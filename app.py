@@ -32,11 +32,24 @@ with col1:
     st.subheader("1. Entradas de Evaluación")
     nombre_profesor = st.text_input("Nombre del Profesor/a", value="Profesor/a Evaluador/a")
     
-    # Opción dual: subir archivo de rúbrica O escribirla
-    archivo_rubrica = st.file_uploader("Sube la rúbrica (Imagen o PDF)", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
-    rubrica_texto = st.text_area("O pega el texto de la rúbrica aquí:", height=100)
+    archivo_rubrica = st.file_uploader(
+        "Sube la rúbrica (Imagen o PDF)", 
+        type=["pdf", "png", "jpg", "jpeg", "webp", "txt"], 
+        key="uploader_rubrica"
+    )
+    if archivo_rubrica and archivo_rubrica.type.startswith("image"):
+        st.image(archivo_rubrica, caption="Rúbrica cargada", width=250)
+        
+    rubrica_texto = st.text_area("O pega el texto de la rúbrica aquí si no tienes archivo:", height=100)
     
-    archivo_prueba = st.file_uploader("Sube la prueba del alumno (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="prueba_file")
+    archivo_prueba = st.file_uploader(
+        "Sube la prueba del alumno (PDF o Imagen)", 
+        type=["pdf", "png", "jpg", "jpeg", "webp"], 
+        key="uploader_prueba"
+    )
+    if archivo_prueba and archivo_prueba.type.startswith("image"):
+        st.image(archivo_prueba, caption="Prueba cargada", width=250)
+
     boton_evaluar = st.button("Evaluar y Calificar", type="primary")
 
 with col2:
@@ -53,7 +66,6 @@ with col2:
                 try:
                     client = genai.Client(api_key=API_KEY)
                     
-                    # Preparar contenidos para la IA
                     prompt_instruccion = """
                     Evalúa la prueba adjunta utilizando la rúbrica proporcionada.
                     
@@ -69,19 +81,24 @@ with col2:
                     
                     partes_mensaje = []
                     
-                    # Adjuntar rúbrica (sea archivo o texto)
                     if archivo_rubrica:
-                        partes_mensaje.append(genai.types.Part.from_bytes(data=archivo_rubrica.read(), mime_type=archivo_rubrica.type))
-                        partes_mensaje.append("La imagen/documento anterior corresponde a la RÚBRICA de evaluación.")
+                        partes_mensaje.append(genai.types.Part.from_bytes(data=archivo_rubrica.getvalue(), mime_type=archivo_rubrica.type))
+                        partes_mensaje.append("El archivo anterior es la RÚBRICA de evaluación.")
                     if rubrica_texto.strip():
-                        partes_mensaje.append(f"Criterios de rúbrica en texto:\n{rubrica_texto}")
+                        partes_mensaje.append(f"Texto complementario de rúbrica:\n{rubrica_texto}")
                         
-                    # Adjuntar prueba del alumno
-                    partes_mensaje.append(genai.types.Part.from_bytes(data=archivo_prueba.read(), mime_type=archivo_prueba.type))
-                    partes_mensaje.append("El documento anterior corresponde a la PRUEBA del alumno a evaluar.")
+                    partes_mensaje.append(genai.types.Part.from_bytes(data=archivo_prueba.getvalue(), mime_type=archivo_prueba.type))
+                    partes_mensaje.append("El archivo anterior es la PRUEBA del estudiante a calificar.")
                     partes_mensaje.append(prompt_instruccion)
 
-                    modelos_respaldo = ["gemini-2.5-flash", "gemini-3.6-flash"]
+                    # Modelos ordenados por disponibilidad y estabilidad
+                    modelos_respaldo = [
+                        "gemini-2.0-flash",
+                        "gemini-1.5-flash",
+                        "gemini-2.5-flash",
+                        "gemini-3.6-flash"
+                    ]
+                    
                     res = None
                     ultimo_error = None
 
@@ -91,13 +108,14 @@ with col2:
                                 model=modelo,
                                 contents=partes_mensaje
                             )
-                            break
+                            if res and res.text:
+                                break
                         except Exception as err:
                             ultimo_error = err
-                            time.sleep(1)
+                            time.sleep(1.5)
                             continue
 
-                    if res is None:
+                    if res is None or not res.text:
                         raise ultimo_error
 
                     limpio = res.text.replace("```json", "").replace("```", "").strip()
