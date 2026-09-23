@@ -6,14 +6,14 @@ from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
 
-st.set_page_config(page_title="Corrector con Rúbrica", layout="wide")
+st.set_page_config(page_title="Corrector y Retroalimentador de Pruebas", layout="wide")
 st.title("Corrector y Retroalimentador de Pruebas")
 
-# Archivo donde se irán guardando todas las notas automáticamente
 ARCHIVO_PLANILLA = "registro_calificaciones.csv"
 
-def guardar_en_registro(datos):
+def guardar_en_registro(datos, profesor):
     fila = pd.DataFrame([{
+        "Docente": profesor,
         "Estudiante": datos.get("nombre", "No especificado"),
         "RUT": datos.get("rut", "No especificado"),
         "Puntaje": datos.get("puntaje", 0.0),
@@ -30,6 +30,7 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("1. Entradas de Evaluación")
     api_key = st.text_input("Gemini API Key (Google AI Studio)", type="password")
+    nombre_profesor = st.text_input("Nombre del Profesor/a", value="Profesor/a Evaluador/a")
     rubrica = st.text_area("Pega aquí la rúbrica de evaluación:", height=180)
     archivo = st.file_uploader("Sube la prueba del alumno (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"])
     boton_evaluar = st.button("Evaluar y Calificar", type="primary")
@@ -38,7 +39,7 @@ with col2:
     st.subheader("2. Resultado del Alumno")
     if boton_evaluar:
         if not api_key or not rubrica or not archivo:
-            st.warning("Debes ingresar la API Key, la rúbrica y el archivo del alumno.")
+            st.warning("Debes ingresar la API Key, el nombre del profesor/a, la rúbrica y la prueba.")
         else:
             with st.spinner("Evaluando documento..."):
                 try:
@@ -53,7 +54,7 @@ with col2:
                         "rut": "RUT del alumno",
                         "puntaje": 20.0,
                         "nota": 7.0,
-                        "feedback": "Retroalimentación clara, directa y formativa"
+                        "feedback": "Retroalimentación formativa y clara"
                     }}
                     """
                     
@@ -69,12 +70,22 @@ with col2:
                     st.metric(label="Nota Final", value=data.get('nota'))
                     st.write(f"**Feedback:** {data.get('feedback')}")
                     
-                    # Generar PDF individual
+                    # Generar PDF configurando título y autor (evita el "anonymous")
                     buffer = io.BytesIO()
-                    doc = SimpleDocTemplate(buffer, pagesize=letter)
+                    titulo_pdf = f"Informe de Evaluación - {data.get('nombre', 'Estudiante')}"
+                    
+                    doc = SimpleDocTemplate(
+                        buffer,
+                        pagesize=letter,
+                        title=titulo_pdf,
+                        author=nombre_profesor
+                    )
+                    
                     styles = getSampleStyleSheet()
                     historia = [
                         Paragraph(f"<b>Informe: {data.get('nombre')}</b>", styles['Title']),
+                        Spacer(1, 10),
+                        Paragraph(f"<b>Profesor/a:</b> {nombre_profesor}", styles['Normal']),
                         Spacer(1, 10),
                         Paragraph(f"<b>RUT:</b> {data.get('rut')} | <b>Puntaje:</b> {data.get('puntaje')} | <b>Nota:</b> {data.get('nota')}", styles['Normal']),
                         Spacer(1, 10),
@@ -90,14 +101,12 @@ with col2:
                         mime="application/pdf"
                     )
                     
-                    # Guardar automáticamente en la planilla interna
-                    guardar_en_registro(data)
+                    guardar_en_registro(data, nombre_profesor)
                     st.info("Datos agregados a la planilla consolidada.")
                     
                 except Exception as e:
                     st.error(f"Error durante el proceso: {e}")
 
-# --- PLANILLA CONSOLIDADA DEL CURSO ---
 st.divider()
 st.subheader("Planilla Consolidada de Evaluaciones")
 
