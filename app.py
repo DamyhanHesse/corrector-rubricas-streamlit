@@ -58,7 +58,7 @@ with col2:
         if not API_KEY:
             st.error("Falta configurar la clave GEMINI_API_KEY en los Secrets de Streamlit.")
         elif not archivo_rubrica and not rubrica_texto.strip():
-            st.warning("Debes subir el archivo de la rúbrica o pegar su texto.")
+            st.warning("Debes subir el archivo de la rúbrica o escribir su texto.")
         elif not archivo_prueba:
             st.warning("Debes subir la prueba del alumno.")
         else:
@@ -91,29 +91,23 @@ with col2:
                     partes_mensaje.append("El archivo anterior es la PRUEBA del estudiante a calificar.")
                     partes_mensaje.append(prompt_instruccion)
 
-                    # Modelos ordenados por disponibilidad y estabilidad
-                    modelos_respaldo = [
-                        "gemini-2.0-flash",
-                        "gemini-1.5-flash",
-                        "gemini-2.5-flash",
-                        "gemini-3.6-flash"
-                    ]
-                    
+                    # Intentos escalonados con pausas para superar congestión temporal
+                    modelos = ["gemini-2.5-flash", "gemini-2.5-pro"]
                     res = None
                     ultimo_error = None
 
-                    for modelo in modelos_respaldo:
+                    for intento in range(3):
+                        modelo_actual = modelos[intento % len(modelos)]
                         try:
                             res = client.models.generate_content(
-                                model=modelo,
+                                model=modelo_actual,
                                 contents=partes_mensaje
                             )
                             if res and res.text:
                                 break
                         except Exception as err:
                             ultimo_error = err
-                            time.sleep(1.5)
-                            continue
+                            time.sleep(3)  # Pausa requerida para liberar el socket ante 503
 
                     if res is None or not res.text:
                         raise ultimo_error
@@ -127,6 +121,7 @@ with col2:
                     st.write(f"**Puntaje:** {data.get('puntaje')} pts")
                     st.write(f"**Feedback:** {data.get('feedback')}")
                     
+                    # Generación del informe PDF con metadatos corregidos
                     buffer = io.BytesIO()
                     doc = SimpleDocTemplate(
                         buffer,
