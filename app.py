@@ -1,5 +1,5 @@
 import streamlit as st
-import json, io, os
+import json, io, os, time
 import pandas as pd
 from google import genai
 from reportlab.lib.pagesizes import letter
@@ -31,8 +31,12 @@ col1, col2 = st.columns(2)
 with col1:
     st.subheader("1. Entradas de Evaluación")
     nombre_profesor = st.text_input("Nombre del Profesor/a", value="Profesor/a Evaluador/a")
-    rubrica = st.text_area("Pega aquí la rúbrica de evaluación:", height=180)
-    archivo = st.file_uploader("Sube la prueba del alumno (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"])
+    
+    # Opción dual: subir archivo de rúbrica O escribirla
+    archivo_rubrica = st.file_uploader("Sube la rúbrica (Imagen o PDF)", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
+    rubrica_texto = st.text_area("O pega el texto de la rúbrica aquí:", height=100)
+    
+    archivo_prueba = st.file_uploader("Sube la prueba del alumno (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="prueba_file")
     boton_evaluar = st.button("Evaluar y Calificar", type="primary")
 
 with col2:
@@ -40,32 +44,64 @@ with col2:
     if boton_evaluar:
         if not API_KEY:
             st.error("Falta configurar la clave GEMINI_API_KEY en los Secrets de Streamlit.")
-        elif not rubrica or not archivo:
-            st.warning("Debes ingresar la rúbrica y subir la prueba del alumno.")
+        elif not archivo_rubrica and not rubrica_texto.strip():
+            st.warning("Debes subir el archivo de la rúbrica o pegar su texto.")
+        elif not archivo_prueba:
+            st.warning("Debes subir la prueba del alumno.")
         else:
-            with st.spinner("Evaluando documento..."):
+            with st.spinner("Evaluando documento con la rúbrica..."):
                 try:
                     client = genai.Client(api_key=API_KEY)
-                    prompt = f"""
-                    Evalúa la prueba adjunta según esta rúbrica:
-                    {rubrica}
+                    
+                    # Preparar contenidos para la IA
+                    prompt_instruccion = """
+                    Evalúa la prueba adjunta utilizando la rúbrica proporcionada.
                     
                     Devuelve ÚNICAMENTE un objeto JSON válido con este formato exacto, sin bloques markdown ni texto extra:
-                    {{
+                    {
                         "nombre": "Nombre del alumno",
                         "rut": "RUT del alumno",
                         "puntaje": 20.0,
                         "nota": 7.0,
                         "feedback": "Retroalimentación formativa y clara"
-                    }}
+                    }
                     """
                     
-                    res = client.models.generate_content(
-                        model="gemini-3.6-flash",
-                        contents=[genai.types.Part.from_bytes(data=archivo.read(), mime_type=archivo.type), prompt]
-                    )
+                    partes_mensaje = []
                     
-                    data = json.loads(res.text.replace("```json", "").replace("```", "").strip())
+                    # Adjuntar rúbrica (sea archivo o texto)
+                    if archivo_rubrica:
+                        partes_mensaje.append(genai.types.Part.from_bytes(data=archivo_rubrica.read(), mime_type=archivo_rubrica.type))
+                        partes_mensaje.append("La imagen/documento anterior corresponde a la RÚBRICA de evaluación.")
+                    if rubrica_texto.strip():
+                        partes_mensaje.append(f"Criterios de rúbrica en texto:\n{rubrica_texto}")
+                        
+                    # Adjuntar prueba del alumno
+                    partes_mensaje.append(genai.types.Part.from_bytes(data=archivo_prueba.read(), mime_type=archivo_prueba.type))
+                    partes_mensaje.append("El documento anterior corresponde a la PRUEBA del alumno a evaluar.")
+                    partes_mensaje.append(prompt_instruccion)
+
+                    modelos_respaldo = ["gemini-2.5-flash", "gemini-3.6-flash"]
+                    res = None
+                    ultimo_error = None
+
+                    for modelo in modelos_respaldo:
+                        try:
+                            res = client.models.generate_content(
+                                model=modelo,
+                                contents=partes_mensaje
+                            )
+                            break
+                        except Exception as err:
+                            ultimo_error = err
+                            time.sleep(1)
+                            continue
+
+                    if res is None:
+                        raise ultimo_error
+
+                    limpio = res.text.replace("```json", "").replace("```", "").strip()
+                    data = json.loads(limpio)
                     
                     st.success("Evaluación finalizada.")
                     st.write(f"**Estudiante:** {data.get('nombre')}")
