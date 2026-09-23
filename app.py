@@ -8,64 +8,73 @@ from reportlab.lib.styles import getSampleStyleSheet
 
 st.set_page_config(page_title="Corrector con Rúbrica", layout="wide")
 
-# Inyección de estilos con la paleta de colores
+# Estilos en cascada de arriba a abajo según la paleta
 st.markdown("""
     <style>
-    /* Fondo principal y textos */
+    /* 1. Fondo superior y cuerpo principal (#99B898) */
     .stApp {
-        background-color: #2A363B;
-        color: #FECEA8;
-    }
-    
-    /* Encabezados */
-    h1 {
-        color: #99B898 !important;
-        font-weight: 700;
-    }
-    h2, h3 {
-        color: #FECEA8 !important;
-    }
-    
-    /* Etiquetas y textos secundarios */
-    label, p, span {
-        color: #FECEA8 !important;
+        background: linear-gradient(180deg, #99B898 0%, #FECEA8 35%, #FFFFFF 100%);
+        color: #2A363B;
     }
 
-    /* Campos de entrada (inputs, textarea) */
+    /* Encabezado superior */
+    h1 {
+        color: #2A363B !important;
+        font-weight: 800;
+        text-shadow: 0 1px 2px rgba(255,255,255,0.4);
+    }
+    
+    /* 2. Subtítulos y etiquetas intermedias (#FECEA8 y acento) */
+    h2, h3 {
+        color: #2A363B !important;
+        font-weight: 700;
+    }
+    label, p, span {
+        color: #2A363B !important;
+        font-weight: 500;
+    }
+
+    /* Campos de entrada con fondo melocotón muy suave y borde #FF847C */
     .stTextInput input, .stTextArea textarea {
-        background-color: #36444a !important;
-        color: #FFFFFF !important;
-        border: 1px solid #99B898 !important;
+        background-color: #FFF6EE !important;
+        color: #2A363B !important;
+        border: 2px solid #FF847C !important;
         border-radius: 8px !important;
     }
 
-    /* Botón principal (Evaluar) */
+    /* 3. Botón de acción principal (#E84A5F) con hover coral (#FF847C) */
     div.stButton > button:first-child {
         background-color: #E84A5F !important;
         color: #FFFFFF !important;
         border: none !important;
         border-radius: 8px !important;
-        font-weight: bold;
-        transition: 0.3s;
+        font-size: 16px !important;
+        font-weight: bold !important;
+        padding: 0.6rem 1.2rem !important;
+        transition: 0.2s ease-in-out;
     }
     div.stButton > button:first-child:hover {
         background-color: #FF847C !important;
         color: #2A363B !important;
     }
 
-    /* Métricas y destaques */
+    /* Indicador de Nota */
     [data-testid="stMetricValue"] {
-        color: #99B898 !important;
+        color: #E84A5F !important;
     }
 
-    /* Cuadros informativos */
-    .stSuccess {
-        background-color: rgba(153, 184, 152, 0.2) !important;
-        border-left-color: #99B898 !important;
+    /* 4. Sección inferior (#2A363B) para la planilla */
+    .seccion-inferior {
+        background-color: #2A363B;
+        padding: 24px;
+        border-radius: 12px;
+        margin-top: 25px;
     }
-    .stWarning {
-        background-color: rgba(255, 132, 124, 0.2) !important;
-        border-left-color: #FF847C !important;
+    .seccion-inferior h3 {
+        color: #FECEA8 !important;
+    }
+    .seccion-inferior p {
+        color: #FFFFFF !important;
     }
     </style>
 """, unsafe_allow_html=True)
@@ -157,7 +166,8 @@ with col2:
                 except Exception as e:
                     st.error(f"Error durante el proceso: {e}")
 
-st.divider()
+# Bloque inferior oscuro (#2A363B)
+st.markdown('<div class="seccion-inferior">', unsafe_allow_html=True)
 st.subheader("Planilla Consolidada de Evaluaciones")
 
 if os.path.exists(ARCHIVO_PLANILLA):
@@ -178,3 +188,5 @@ if os.path.exists(ARCHIVO_PLANILLA):
             st.rerun()
 else:
     st.write("Aún no hay calificaciones registradas. Aparecerán aquí automáticamente al evaluar.")
+
+st.markdown('</div>', unsafe_allow_html=True)
