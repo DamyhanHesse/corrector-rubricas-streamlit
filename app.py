@@ -91,23 +91,21 @@ with col2:
                     partes_mensaje.append("El archivo anterior es la PRUEBA del estudiante a calificar.")
                     partes_mensaje.append(prompt_instruccion)
 
-                    # Intentos escalonados con pausas para superar congestión temporal
-                    modelos = ["gemini-2.5-flash", "gemini-2.5-pro"]
+                    # Reintentos directos sobre el modelo oficial indicado por la API
                     res = None
                     ultimo_error = None
 
                     for intento in range(3):
-                        modelo_actual = modelos[intento % len(modelos)]
                         try:
                             res = client.models.generate_content(
-                                model=modelo_actual,
+                                model="gemini-3.6-flash",
                                 contents=partes_mensaje
                             )
                             if res and res.text:
                                 break
                         except Exception as err:
                             ultimo_error = err
-                            time.sleep(3)  # Pausa requerida para liberar el socket ante 503
+                            time.sleep(2)
 
                     if res is None or not res.text:
                         raise ultimo_error
@@ -121,7 +119,6 @@ with col2:
                     st.write(f"**Puntaje:** {data.get('puntaje')} pts")
                     st.write(f"**Feedback:** {data.get('feedback')}")
                     
-                    # Generación del informe PDF con metadatos corregidos
                     buffer = io.BytesIO()
                     doc = SimpleDocTemplate(
                         buffer,
