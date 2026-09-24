@@ -1,11 +1,13 @@
 import os
 import time
 import io
-import base64
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
-from pypdf import PdfReader
+
+# SDK Oficial google-genai
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 
 # Librerías para generación de PDF en ReportLab
 from reportlab.lib.pagesizes import letter
@@ -14,7 +16,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA Y CONSTANTES
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS NATIVOS
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Corrector y Retroalimentador de Pruebas",
@@ -23,97 +25,58 @@ st.set_page_config(
 )
 
 CSV_FILE = "registro_calificaciones.csv"
-NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
-MODEL_ID = "meta/llama-3.3-70b-instruct"
 
 # -----------------------------------------------------------------------------
-# 2. CLIENTE NVIDIA NIM Y EVALUACIÓN CON REINTENTOS ESCALONADOS
+# 2. CLIENTE GEMINI Y BUCLE DE REINTENTOS ESCALONADOS
 # -----------------------------------------------------------------------------
-def get_nvidia_client():
-    api_key = st.secrets.get("NVIDIA_API_KEY")
+def get_gemini_client():
+    api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
-        st.error("No se encontró 'NVIDIA_API_KEY' en los Secrets de Streamlit.")
+        st.error("No se encontró 'GEMINI_API_KEY' en los Secrets de Streamlit.")
         st.stop()
-    return OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
+    return genai.Client(api_key=api_key)
 
-def procesar_archivo_a_texto_o_b64(file_uploader_obj):
-    """Convierte el archivo a texto plano (PDF) o cadena base64 (Imágenes)."""
-    if file_uploader_obj is None:
-        return None
+def generar_evaluacion_con_reintentos(client, contents, prompt_sistema, max_retries=3):
+    """
+    Realiza llamadas al modelo gemini-3.6-flash con reintentos
+    escalonados para manejar saturación puntual o cuotas de peticiones.
+    """
+    model_id = "gemini-3.6-flash"
     
-    file_bytes = file_uploader_obj.read()
-    mime_type = file_uploader_obj.type
-
-    if mime_type == "application/pdf":
-        try:
-            pdf_reader = PdfReader(io.BytesIO(file_bytes))
-            texto_extraido = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
-            return {"tipo": "texto", "contenido": texto_extraido}
-        except Exception as e:
-            st.error(f"Error al leer el archivo PDF: {e}")
-            return None
-    elif mime_type in ["image/png", "image/jpeg", "image/jpg"]:
-        b64_encoded = base64.b64encode(file_bytes).decode("utf-8")
-        return {"tipo": "imagen", "contenido": f"data:{mime_type};base64,{b64_encoded}"}
-    return None
-
-def generar_evaluacion_nvidia(client, prompt_sistema, contenido_rubrica, contenido_prueba, max_retries=3):
-    """
-    Envía la solicitud a NVIDIA NIM manejando reintentos exponenciales ante saturación.
-    """
-    content_payload = []
-
-    # Procesar Rúbrica
-    if isinstance(contenido_rubrica, str):
-        content_payload.append({"type": "text", "text": f"RÚBRICA DE EVALUACIÓN:\n{contenido_rubrica}"})
-    elif isinstance(contenido_rubrica, dict):
-        if contenido_rubrica["tipo"] == "texto":
-            content_payload.append({"type": "text", "text": f"RÚBRICA DE EVALUACIÓN:\n{contenido_rubrica['contenido']}"})
-        elif contenido_rubrica["tipo"] == "imagen":
-            content_payload.append({"type": "text", "text": "RÚBRICA DE EVALUACIÓN (IMAGEN):"})
-            content_payload.append({"type": "image_url", "image_url": {"url": contenido_rubrica["contenido"]}})
-
-    # Procesar Prueba
-    if isinstance(contenido_prueba, dict):
-        if contenido_prueba["tipo"] == "texto":
-            content_payload.append({"type": "text", "text": f"PRUEBA DEL ESTUDIANTE:\n{contenido_prueba['contenido']}"})
-        elif contenido_prueba["tipo"] == "imagen":
-            content_payload.append({"type": "text", "text": "PRUEBA DEL ESTUDIANTE (IMAGEN):"})
-            content_payload.append({"type": "image_url", "image_url": {"url": contenido_prueba["contenido"]}})
-
-    messages = [
-        {"role": "system", "content": prompt_sistema},
-        {"role": "user", "content": content_payload}
-    ]
-
     for intento in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=MODEL_ID,
-                messages=messages,
-                temperature=0.2,
-                max_tokens=2048
+            response = client.models.generate_content(
+                model=model_id,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=prompt_sistema,
+                    temperature=0.2
+                )
             )
-            return response.choices[0].message.content
-        except Exception as e:
-            err_msg = str(e)
-            if "429" in err_msg or "rate limit" in err_msg.lower():
+            return response.text
+        except APIError as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 if intento < max_retries - 1:
-                    time.sleep((intento + 1) * 3)
+                    wait_time = (intento + 1) * 4
+                    time.sleep(wait_time)
                     continue
                 else:
-                    st.error("⚠️ Se ha alcanzado el límite de tasa (429) de NVIDIA NIM.")
+                    st.error("⚠️ Se ha alcanzado el límite de cuota de la API de Gemini.")
+                    st.info("Sugerencia: Espera unos instantes o revisa tu cuota en Google AI Studio.")
                     return None
-            elif "503" in err_msg or "unavailable" in err_msg.lower():
+            elif "503" in str(e):
                 if intento < max_retries - 1:
-                    time.sleep(4)
+                    time.sleep(3)
                     continue
                 else:
-                    st.error("⚠️ El servicio de NVIDIA está temporalmente saturado (503). Intente nuevamente.")
+                    st.error("⚠️ El servicio de Gemini está temporalmente saturado (503). Inténtalo más tarde.")
                     return None
             else:
-                st.error(f"Error en la API de NVIDIA: {e}")
+                st.error(f"Error en la API de Gemini: {e}")
                 return None
+        except Exception as ex:
+            st.error(f"Error inesperado durante la ejecución: {ex}")
+            return None
     return None
 
 # -----------------------------------------------------------------------------
@@ -125,7 +88,8 @@ def cargar_registro():
             return pd.read_csv(CSV_FILE, on_bad_lines='skip')
         except Exception:
             return pd.DataFrame(columns=["Docente", "Estudiante", "Puntaje", "Nota", "Fecha"])
-    return pd.DataFrame(columns=["Docente", "Estudiante", "Puntaje", "Nota", "Fecha"])
+    else:
+        return pd.DataFrame(columns=["Docente", "Estudiante", "Puntaje", "Nota", "Fecha"])
 
 def guardar_registro(df):
     df.to_csv(CSV_FILE, index=False)
@@ -142,6 +106,7 @@ def exportar_excel(df):
 def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedback_texto):
     buffer = io.BytesIO()
     
+    # Declaración explícita de metadatos para evitar la etiqueta (anonymous)
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
@@ -150,7 +115,7 @@ def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedba
         topMargin=40,
         bottomMargin=40,
         title=f"Informe de Evaluación - {nombre_estudiante}",
-        author=nombre_docente
+        author=nombre_docente if nombre_docente else "Docente Evaluador"
     )
     
     styles = getSampleStyleSheet()
@@ -179,8 +144,8 @@ def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedba
     story.append(Spacer(1, 10))
 
     data = [
-        [Paragraph("<b>Docente:</b>", body_style), Paragraph(nombre_docente, body_style)],
-        [Paragraph("<b>Estudiante:</b>", body_style), Paragraph(nombre_estudiante, body_style)],
+        [Paragraph("<b>Docente:</b>", body_style), Paragraph(nombre_docente if nombre_docente else "No especificado", body_style)],
+        [Paragraph("<b>Estudiante:</b>", body_style), Paragraph(nombre_estudiante if nombre_estudiante else "No especificado", body_style)],
         [Paragraph("<b>Puntaje Obt.:</b>", body_style), Paragraph(str(puntaje), body_style)],
         [Paragraph("<b>Nota Final:</b>", body_style), Paragraph(str(nota), body_style)]
     ]
@@ -211,19 +176,19 @@ def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedba
     return buffer.getvalue()
 
 # -----------------------------------------------------------------------------
-# 5. INTERFAZ DE USUARIO STREAMLIT
+# 5. INTERFAZ DE USUARIO STREAMLIT (LAYOUT DOS COLUMNAS)
 # -----------------------------------------------------------------------------
 def main():
     st.title("📝 Corrector y Retroalimentador de Pruebas")
-    st.caption("Motor de Evaluación con NVIDIA NIM API")
+    st.caption("Motor de Evaluación con Google Gemini API")
 
     col_izq, col_der = st.columns([1, 1], gap="large")
 
     with col_izq:
         st.subheader("1. Configuración y Entradas")
         
-        profesor = st.text_input("Nombre del Profesor/a", value="Prof. Carlos Mendoza")
-        estudiante = st.text_input("Nombre del Estudiante", value="Estudiante 1")
+        profesor = st.text_input("Nombre del Profesor/a", placeholder="Ingrese su nombre aquí...")
+        estudiante = st.text_input("Nombre del Estudiante", placeholder="Ingrese nombre del estudiante...")
 
         st.markdown("---")
         st.markdown("**Rúbrica de Evaluación**")
@@ -235,12 +200,17 @@ def main():
         else:
             rubrica_file = st.file_uploader("Subir Rúbrica (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
             if rubrica_file:
-                rubrica_content = procesar_archivo_a_texto_o_b64(rubrica_file)
+                rubrica_bytes = rubrica_file.read()
+                rubrica_content = types.Part.from_bytes(data=rubrica_bytes, mime_type=rubrica_file.type)
 
         st.markdown("---")
         st.markdown("**Prueba del Estudiante**")
         prueba_file = st.file_uploader("Subir Prueba (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="prueba_file")
-        prueba_content = procesar_archivo_a_texto_o_b64(prueba_file) if prueba_file else None
+        
+        prueba_part = None
+        if prueba_file:
+            prueba_bytes = prueba_file.read()
+            prueba_part = types.Part.from_bytes(data=prueba_bytes, mime_type=prueba_file.type)
 
         btn_evaluar = st.button("🚀 Evaluar Prueba", use_container_width=True, type="primary")
 
@@ -251,11 +221,11 @@ def main():
             if not rubrica_content:
                 st.warning("Debe ingresar o adjuntar una rúbrica.")
                 return
-            if not prueba_content:
+            if not prueba_part:
                 st.warning("Debe adjuntar la prueba del estudiante.")
                 return
 
-            client = get_nvidia_client()
+            client = get_gemini_client()
             
             prompt_sistema = """
             Eres un asistente docente experto en evaluación educativa.
@@ -270,14 +240,22 @@ def main():
             - Aspectos a mejorar según la rúbrica.
             - Sugerencias concretas para el estudiante.
             """
+
+            contents = []
+            if isinstance(rubrica_content, str):
+                contents.append(f"RÚBRICA DE EVALUACIÓN:\n{rubrica_content}")
+            else:
+                contents.append(rubrica_content)
+                
+            contents.append(prueba_part)
             
-            with st.spinner("Analizando evaluación con NVIDIA NIM..."):
-                resultado = generar_evaluacion_nvidia(client, prompt_sistema, rubrica_content, prueba_content)
+            with st.spinner("Analizando la prueba y generando retroalimentación..."):
+                resultado = generar_evaluacion_con_reintentos(client, contents, prompt_sistema)
                 
             if resultado:
                 st.session_state["ultimo_resultado"] = resultado
-                st.session_state["ultimo_estudiante"] = estudiante
-                st.session_state["ultimo_profesor"] = profesor
+                st.session_state["ultimo_estudiante"] = estudiante if estudiante else "Estudiante"
+                st.session_state["ultimo_profesor"] = profesor if profesor else "Docente"
 
                 nota_val = "N/A"
                 puntaje_val = "N/A"
@@ -290,10 +268,11 @@ def main():
                 st.session_state["ultima_nota"] = nota_val
                 st.session_state["ultimo_puntaje"] = puntaje_val
 
+                # Registrar en CSV local
                 df_actual = cargar_registro()
                 nuevo_registro = pd.DataFrame([{
-                    "Docente": profesor,
-                    "Estudiante": estudiante,
+                    "Docente": profesor if profesor else "Docente",
+                    "Estudiante": estudiante if estudiante else "Estudiante",
                     "Puntaje": puntaje_val,
                     "Nota": nota_val,
                     "Fecha": time.strftime("%Y-%m-%d %H:%M:%S")
@@ -311,9 +290,10 @@ def main():
             st.markdown("### Retroalimentación Formativa")
             st.write(st.session_state["ultimo_resultado"])
 
+            # Generación y descarga de PDF
             pdf_bytes = generar_pdf_informe(
-                st.session_state.get("ultimo_profesor", profesor),
-                st.session_state.get("ultimo_estudiante", estudiante),
+                st.session_state.get("ultimo_profesor", "Docente"),
+                st.session_state.get("ultimo_estudiante", "Estudiante"),
                 st.session_state.get("ultima_nota", "N/A"),
                 st.session_state.get("ultimo_puntaje", "N/A"),
                 st.session_state["ultimo_resultado"]
@@ -327,6 +307,9 @@ def main():
                 use_container_width=True
             )
 
+    # -------------------------------------------------------------------------
+    # SECCIÓN INFERIOR: PLANILLA DE REGISTRO ACUMULADO
+    # -------------------------------------------------------------------------
     st.markdown("---")
     st.subheader("📊 Registro Acumulado de Calificaciones")
     
