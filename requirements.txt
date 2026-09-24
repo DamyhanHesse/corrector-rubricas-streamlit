@@ -10,3 +10,9 @@ reportlab
 google-genai
 groq
 pypdf
+streamlit
+openai
+pandas
+openpyxl
+reportlab
+pypdf
