@@ -29,67 +29,56 @@ if not api_key:
 # Inicialización del cliente oficial de Google GenAI
 client = genai.Client(api_key=api_key)
 
-MODELO_PRINCIPAL = "gemini-3.6-flash"
-MODELO_RESPALDO = "gemini-2.5-flash"
+MODELO_ACTIVO = "gemini-3.6-flash"
 ARCHIVO_CSV = "registro_calificaciones.csv"
 
 # ------------------------------------------------------------------------------
-# 2. FUNCIONES CON REINTENTOS ESCALONADOS (MANEJO ROBUSTO DE ERROR 503)
+# 2. FUNCIONES CON REINTENTOS ESCALONADOS (MANEJO DE SATURACIÓN 503 Y 429)
 # ------------------------------------------------------------------------------
 def generar_contenido_con_reintentos(client, contenidos, system_instruction, max_reintentos=5):
     """
     Ejecuta peticiones a la API con reintentos escalonados ante errores 503 o 429.
-    Utiliza backoff exponencial con jitter y modelo de respaldo si la saturación persiste.
+    Utiliza backoff exponencial con fluctuación aleatoria (jitter) sobre gemini-3.6-flash.
     """
-    modelos = [MODELO_PRINCIPAL, MODELO_RESPALDO]
-    
-    for modelo in modelos:
-        for intento in range(1, max_reintentos + 1):
-            try:
-                config = types.GenerateContentConfig(
-                    system_instruction=system_instruction,
-                    temperature=0.2
-                )
-                
-                response = client.models.generate_content(
-                    model=modelo,
-                    contents=contenidos,
-                    config=config
-                )
-                return response.text
+    for intento in range(1, max_reintentos + 1):
+        try:
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.2
+            )
             
-            except APIError as e:
-                # Código 503 (UNAVAILABLE) o 429 (RESOURCE_EXHAUSTED / RATE LIMIT)
-                es_saturacion = (e.code == 503 or e.code == 429 or "UNAVAILABLE" in str(e) or "high demand" in str(e))
-                
-                if es_saturacion and intento < max_reintentos:
-                    # Tiempo de espera exponencial con fluctuación aleatoria (jitter)
-                    tiempo_espera = (2 ** intento) + random.uniform(0.5, 1.5)
-                    st.toast(
-                        f"Servidor ocupado. Reintentando ({intento}/{max_reintentos}) en {tiempo_espera:.1f}s...", 
-                        icon="⏳"
-                    )
-                    time.sleep(tiempo_espera)
-                elif es_saturacion and modelo != modelos[-1]:
-                    # Cambia al modelo de respaldo si el principal falla todos sus reintentos
-                    st.toast(f"Cambiando a modelo de contingencia por alta demanda...", icon="🔄")
-                    break
-                else:
-                    # Si no es un error de saturación recuperable o agotó todos los modelos, lanza la excepción
-                    raise e
-            except Exception as e:
+            response = client.models.generate_content(
+                model=MODELO_ACTIVO,
+                contents=contenidos,
+                config=config
+            )
+            return response.text
+        
+        except APIError as e:
+            # Captura explícita de sobrecarga o límites de tasa
+            es_saturacion = (e.code == 503 or e.code == 429 or "UNAVAILABLE" in str(e) or "high demand" in str(e))
+            
+            if es_saturacion and intento < max_reintentos:
+                tiempo_espera = (2 ** intento) + random.uniform(0.5, 1.5)
+                st.toast(
+                    f"Servidor en alta demanda. Reintentando ({intento}/{max_reintentos}) en {tiempo_espera:.1f}s...", 
+                    icon="⏳"
+                )
+                time.sleep(tiempo_espera)
+            else:
                 raise e
-                
-    raise RuntimeError("No se pudo completar la solicitud debido a una saturación prolongada en los servidores de IA.")
+        except Exception as e:
+            raise e
+            
+    raise RuntimeError("No se pudo completar la solicitud debido a saturación prolongada en los servidores de IA.")
 
 # ------------------------------------------------------------------------------
 # 3. GENERACIÓN DE REPORTES EN PDF (REPORTLAB)
 # ------------------------------------------------------------------------------
 def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
-    """Genera un archivo PDF con formato limpio e identificadores correctos."""
+    """Genera un archivo PDF con formato profesional e identificadores explícitos."""
     buffer = io.BytesIO()
     
-    # Documento con metadatos explícitos
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
@@ -103,19 +92,18 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
     
     styles = getSampleStyleSheet()
     
-    # Estilos personalizados
     estilo_titulo = ParagraphStyle('TituloDoc', parent=styles['Heading1'], fontSize=18, leading=22, textColor=colors.HexColor('#1E293B'))
     estilo_subtitulo = ParagraphStyle('SubtituloDoc', parent=styles['Heading2'], fontSize=12, leading=16, textColor=colors.HexColor('#475569'))
     estilo_body = ParagraphStyle('CuerpoDoc', parent=styles['Normal'], fontSize=10, leading=14, textColor=colors.HexColor('#0F172A'))
     
     story = []
     
-    # Encabezado
+    # Encabezado del documento
     story.append(Paragraph("Informe de Evaluación y Retroalimentación", estilo_titulo))
     story.append(Paragraph(f"<b>Evaluador/a:</b> {profesor}", estilo_subtitulo))
     story.append(Spacer(1, 15))
     
-    # Resumen de Resultados
+    # Tabla resumen de calificaciones
     tabla_datos = [
         [Paragraph("<b>Calificación Final:</b>", estilo_body), Paragraph(str(nota), estilo_body)],
         [Paragraph("<b>Puntaje Obtenido:</b>", estilo_body), Paragraph(str(puntaje), estilo_body)]
@@ -134,15 +122,13 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
     story.append(t)
     story.append(Spacer(1, 20))
     
-    # Detalle del Feedback Formativo
+    # Cuerpo del feedback formativo
     story.append(Paragraph("<b>Retroalimentación Detallada:</b>", estilo_subtitulo))
     story.append(Spacer(1, 8))
     
-    # Procesar saltos de línea para el PDF
     lineas_feedback = feedback_texto.split('\n')
     for linea in lineas_feedback:
         if linea.strip():
-            # Limpieza básica de Markdown para ReportLab Paragraph
             linea_pdf = linea.replace('**', '<b>').replace('**', '</b>').replace('*', '•')
             story.append(Paragraph(linea_pdf, estilo_body))
             story.append(Spacer(1, 4))
@@ -152,10 +138,10 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
     return buffer
 
 # ------------------------------------------------------------------------------
-# 4. GESTIÓN DEL REGISTRO LOCAL CSV / EXCEL
+# 4. GESTIÓN DEL REGISTRO LOCAL CSV Y EXCEL
 # ------------------------------------------------------------------------------
 def guardar_en_registro(profesor, nota, puntaje):
-    """Guarda los resultados acumulados en el archivo CSV local de forma segura."""
+    """Registra la evaluación en el archivo CSV local."""
     nuevo_registro = pd.DataFrame([{
         "Fecha": time.strftime("%Y-%m-%d %H:%M:%S"),
         "Profesor": profesor,
@@ -169,7 +155,7 @@ def guardar_en_registro(profesor, nota, puntaje):
         nuevo_registro.to_csv(ARCHIVO_CSV, mode='a', header=False, index=False)
 
 def cargar_registro():
-    """Lee el CSV histórico omitiendo líneas corruptas si existieran."""
+    """Carga el historial ignorando líneas corruptas si existieran."""
     if os.path.exists(ARCHIVO_CSV):
         try:
             return pd.read_csv(ARCHIVO_CSV, on_bad_lines='skip')
@@ -178,7 +164,7 @@ def cargar_registro():
     return pd.DataFrame(columns=["Fecha", "Profesor", "Nota", "Puntaje"])
 
 # ------------------------------------------------------------------------------
-# 5. INTERFAZ Y FLUJO DE USUARIO (STREAMLIT)
+# 5. INTERFAZ STREAMLIT
 # ------------------------------------------------------------------------------
 st.title("Corrector y Retroalimentador de Pruebas")
 
@@ -205,7 +191,6 @@ with col2:
     st.subheader("2. Resultado del Alumno")
     
     if btn_evaluar:
-        # Validaciones de entrada
         if not archivo_rubrica and not texto_rubrica.strip():
             st.error("Por favor, proporciona una rúbrica (sube un archivo o escribe el texto).")
         elif not archivo_prueba:
@@ -215,7 +200,7 @@ with col2:
                 try:
                     contenidos_ia = []
                     
-                    # Preparación de la Rúbrica
+                    # Carga de Rúbrica
                     if archivo_rubrica:
                         bytes_rubrica = archivo_rubrica.read()
                         contenidos_ia.append(types.Part.from_bytes(data=bytes_rubrica, mime_type=archivo_rubrica.type))
@@ -223,12 +208,12 @@ with col2:
                     else:
                         contenidos_ia.append(f"Rúbrica de evaluación en texto:\n{texto_rubrica}")
                     
-                    # Preparación de la Prueba
+                    # Carga de Prueba del Estudiante
                     bytes_prueba = archivo_prueba.read()
                     contenidos_ia.append(types.Part.from_bytes(data=bytes_prueba, mime_type=archivo_prueba.type))
                     contenidos_ia.append("Prueba resuelta por el estudiante provista en el archivo adjunto arriba.")
                     
-                    # Instrucciones de Evaluación del Sistema
+                    # Prompt de instrucción
                     instruccion_sistema = (
                         "Eres un asistente pedagógico experto en corrección de evaluaciones académicas. "
                         "Compara rigurosamente la prueba del alumno con la rúbrica entregada.\n\n"
@@ -239,14 +224,14 @@ with col2:
                         "errores cometidos, justificación de puntaje criterio por criterio y sugerencias concretas de mejora."
                     )
                     
-                    # Ejecución con reintentos para evitar fallos 503
+                    # Ejecución segura
                     resultado_texto = generar_contenido_con_reintentos(
                         client=client,
                         contenidos=contenidos_ia,
                         system_instruction=instruccion_sistema
                     )
                     
-                    # Extracción simple de Nota, Puntaje y Feedback
+                    # Procesamiento de respuesta
                     lineas = [l.strip() for l in resultado_texto.split('\n') if l.strip()]
                     nota_extraida = "N/A"
                     puntaje_extraido = "N/A"
@@ -261,10 +246,10 @@ with col2:
                     
                     feedback_completo = "\n\n".join(lineas[idx_inicio_feedback:]) if idx_inicio_feedback > 0 else resultado_texto
                     
-                    # Guardar automáticamente en CSV local
+                    # Persistencia
                     guardar_en_registro(nombre_profesor, nota_extraida, puntaje_extraido)
                     
-                    # Mostrar métricas en la interfaz
+                    # Despliegue en pantalla
                     m1, m2 = st.columns(2)
                     m1.metric("Nota Final", nota_extraida)
                     m2.metric("Puntaje", puntaje_extraido)
@@ -272,7 +257,7 @@ with col2:
                     st.markdown("### Feedback Formativo")
                     st.markdown(feedback_completo)
                     
-                    # Generación y Botón de Descarga del PDF
+                    # Generación de PDF
                     pdf_bytes = generar_reporte_pdf(
                         profesor=nombre_profesor,
                         nota=nota_extraida,
@@ -302,7 +287,6 @@ df_registro = cargar_registro()
 if not df_registro.empty:
     st.dataframe(df_registro, use_container_width=True)
     
-    # Exportación limpia a Excel sin dependencias complejas extra
     buffer_excel = io.BytesIO()
     with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
         df_registro.to_excel(writer, index=False, sheet_name='Calificaciones')
