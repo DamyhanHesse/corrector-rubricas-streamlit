@@ -3,3 +3,10 @@ google-genai
 reportlab
 pandas
 openpyxl
+streamlit
+pandas
+openpyxl
+reportlab
+google-genai
+groq
+pypdf
