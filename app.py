@@ -1,84 +1,145 @@
-import io
 import os
 import time
-import random
+import io
+import base64
 import pandas as pd
 import streamlit as st
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
+from openai import OpenAI
+from pypdf import PdfReader
 
+# Librerías para generación de PDF en ReportLab
 from reportlab.lib.pagesizes import letter
-from reportlab.lib import colors
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
 
-# ------------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA Y SECRETS
-# ------------------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# 1. CONFIGURACIÓN DE PÁGINA Y CONSTANTES
+# -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Corrector y Retroalimentador de Pruebas",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Recuperación segura de la API Key desde Streamlit Secrets
-api_key = st.secrets.get("GEMINI_API_KEY")
-if not api_key:
-    st.error("Error: No se ha configurado 'GEMINI_API_KEY' en los Secrets de Streamlit.")
-    st.stop()
+CSV_FILE = "registro_calificaciones.csv"
+NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
+MODEL_ID = "meta/llama-3.3-70b-instruct"
 
-# Inicialización del cliente oficial de Google GenAI
-client = genai.Client(api_key=api_key)
+# -----------------------------------------------------------------------------
+# 2. CLIENTE NVIDIA NIM Y EVALUACIÓN CON REINTENTOS ESCALONADOS
+# -----------------------------------------------------------------------------
+def get_nvidia_client():
+    api_key = st.secrets.get("NVIDIA_API_KEY")
+    if not api_key:
+        st.error("No se encontró 'NVIDIA_API_KEY' en los Secrets de Streamlit.")
+        st.stop()
+    return OpenAI(base_url=NVIDIA_BASE_URL, api_key=api_key)
 
-MODELO_ACTIVO = "gemini-3.6-flash"
-ARCHIVO_CSV = "registro_calificaciones.csv"
+def procesar_archivo_a_texto_o_b64(file_uploader_obj):
+    """Convierte el archivo a texto plano (PDF) o cadena base64 (Imágenes)."""
+    if file_uploader_obj is None:
+        return None
+    
+    file_bytes = file_uploader_obj.read()
+    mime_type = file_uploader_obj.type
 
-# ------------------------------------------------------------------------------
-# 2. PROCESAMIENTO ROBUSTO DE IA (REINTENTOS ROBUSTOS PARA ERROR 503)
-# ------------------------------------------------------------------------------
-def generar_evaluacion_con_reintentos(client, contenidos, system_instruction, max_reintentos=6):
-    """
-    Ejecuta peticiones utilizando gemini-3.6-flash con backoff exponencial y jitter.
-    Captura sobrecargas 503/429 e insiste con tiempos de espera progresivos antes de fallar.
-    """
-    for intento in range(1, max_reintentos + 1):
+    if mime_type == "application/pdf":
         try:
-            config = types.GenerateContentConfig(
-                system_instruction=system_instruction,
-                temperature=0.2
-            )
-            
-            response = client.models.generate_content(
-                model=MODELO_ACTIVO,
-                contents=contenidos,
-                config=config
-            )
-            return response.text
-        
-        except APIError as e:
-            # Detección de errores de servidor ocupado (503) o límites de tasa (429)
-            es_saturacion = (e.code == 503 or e.code == 429 or "UNAVAILABLE" in str(e) or "high demand" in str(e))
-            
-            if es_saturacion and intento < max_reintentos:
-                # Tiempo de espera incremental + pequeña fluctuación aleatoria para evitar colisiones
-                tiempo_espera = (2 ** intento) + random.uniform(1.0, 3.0)
-                st.toast(
-                    f"Servidor ocupado (503). Reintento {intento}/{max_reintentos} en {tiempo_espera:.1f}s...", 
-                    icon="⏳"
-                )
-                time.sleep(tiempo_espera)
-            else:
-                raise e
+            pdf_reader = PdfReader(io.BytesIO(file_bytes))
+            texto_extraido = "\n".join([page.extract_text() or "" for page in pdf_reader.pages])
+            return {"tipo": "texto", "contenido": texto_extraido}
         except Exception as e:
-            raise e
-            
-    raise RuntimeError("El servidor de Google se encuentra saturado en este momento. Por favor, reintenta en unos instantes.")
+            st.error(f"Error al leer el archivo PDF: {e}")
+            return None
+    elif mime_type in ["image/png", "image/jpeg", "image/jpg"]:
+        b64_encoded = base64.b64encode(file_bytes).decode("utf-8")
+        return {"tipo": "imagen", "contenido": f"data:{mime_type};base64,{b64_encoded}"}
+    return None
 
-# ------------------------------------------------------------------------------
-# 3. GENERACIÓN DE REPORTES EN PDF (REPORTLAB)
-# ------------------------------------------------------------------------------
-def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
-    """Genera un informe PDF profesional especificando metadatos de autoría."""
+def generar_evaluacion_nvidia(client, prompt_sistema, contenido_rubrica, contenido_prueba, max_retries=3):
+    """
+    Envía la solicitud a NVIDIA NIM manejando reintentos exponenciales ante saturación.
+    """
+    content_payload = []
+
+    # Procesar Rúbrica
+    if isinstance(contenido_rubrica, str):
+        content_payload.append({"type": "text", "text": f"RÚBRICA DE EVALUACIÓN:\n{contenido_rubrica}"})
+    elif isinstance(contenido_rubrica, dict):
+        if contenido_rubrica["tipo"] == "texto":
+            content_payload.append({"type": "text", "text": f"RÚBRICA DE EVALUACIÓN:\n{contenido_rubrica['contenido']}"})
+        elif contenido_rubrica["tipo"] == "imagen":
+            content_payload.append({"type": "text", "text": "RÚBRICA DE EVALUACIÓN (IMAGEN):"})
+            content_payload.append({"type": "image_url", "image_url": {"url": contenido_rubrica["contenido"]}})
+
+    # Procesar Prueba
+    if isinstance(contenido_prueba, dict):
+        if contenido_prueba["tipo"] == "texto":
+            content_payload.append({"type": "text", "text": f"PRUEBA DEL ESTUDIANTE:\n{contenido_prueba['contenido']}"})
+        elif contenido_prueba["tipo"] == "imagen":
+            content_payload.append({"type": "text", "text": "PRUEBA DEL ESTUDIANTE (IMAGEN):"})
+            content_payload.append({"type": "image_url", "image_url": {"url": contenido_prueba["contenido"]}})
+
+    messages = [
+        {"role": "system", "content": prompt_sistema},
+        {"role": "user", "content": content_payload}
+    ]
+
+    for intento in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=MODEL_ID,
+                messages=messages,
+                temperature=0.2,
+                max_tokens=2048
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "rate limit" in err_msg.lower():
+                if intento < max_retries - 1:
+                    time.sleep((intento + 1) * 3)
+                    continue
+                else:
+                    st.error("⚠️ Se ha alcanzado el límite de tasa (429) de NVIDIA NIM.")
+                    return None
+            elif "503" in err_msg or "unavailable" in err_msg.lower():
+                if intento < max_retries - 1:
+                    time.sleep(4)
+                    continue
+                else:
+                    st.error("⚠️ El servicio de NVIDIA está temporalmente saturado (503). Intente nuevamente.")
+                    return None
+            else:
+                st.error(f"Error en la API de NVIDIA: {e}")
+                return None
+    return None
+
+# -----------------------------------------------------------------------------
+# 3. GESTIÓN DEL REGISTRO LOCAL CSV / EXCEL
+# -----------------------------------------------------------------------------
+def cargar_registro():
+    if os.path.exists(CSV_FILE):
+        try:
+            return pd.read_csv(CSV_FILE, on_bad_lines='skip')
+        except Exception:
+            return pd.DataFrame(columns=["Docente", "Estudiante", "Puntaje", "Nota", "Fecha"])
+    return pd.DataFrame(columns=["Docente", "Estudiante", "Puntaje", "Nota", "Fecha"])
+
+def guardar_registro(df):
+    df.to_csv(CSV_FILE, index=False)
+
+def exportar_excel(df):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        df.to_excel(writer, index=False, sheet_name='Calificaciones')
+    return output.getvalue()
+
+# -----------------------------------------------------------------------------
+# 4. GENERACIÓN DE INFORME PDF CON REPORTLAB
+# -----------------------------------------------------------------------------
+def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedback_texto):
     buffer = io.BytesIO()
     
     doc = SimpleDocTemplate(
@@ -88,216 +149,199 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
         leftMargin=40,
         topMargin=40,
         bottomMargin=40,
-        title="Informe de Evaluación - Retroalimentación",
-        author=profesor
+        title=f"Informe de Evaluación - {nombre_estudiante}",
+        author=nombre_docente
     )
     
     styles = getSampleStyleSheet()
     
-    estilo_titulo = ParagraphStyle('TituloDoc', parent=styles['Heading1'], fontSize=18, leading=22, textColor=colors.HexColor('#1E293B'))
-    estilo_subtitulo = ParagraphStyle('SubtituloDoc', parent=styles['Heading2'], fontSize=12, leading=16, textColor=colors.HexColor('#475569'))
-    estilo_body = ParagraphStyle('CuerpoDoc', parent=styles['Normal'], fontSize=10, leading=14, textColor=colors.HexColor('#0F172A'))
+    title_style = ParagraphStyle(
+        'DocTitle',
+        parent=styles['Heading1'],
+        fontSize=18,
+        leading=22,
+        textColor=colors.HexColor('#1E293B'),
+        spaceAfter=12
+    )
     
+    body_style = ParagraphStyle(
+        'DocBody',
+        parent=styles['Normal'],
+        fontSize=10,
+        leading=14,
+        textColor=colors.HexColor('#334155'),
+        spaceAfter=8
+    )
+
     story = []
-    
-    # Encabezado
-    story.append(Paragraph("Informe de Evaluación y Retroalimentación", estilo_titulo))
-    story.append(Paragraph(f"<b>Evaluador/a:</b> {profesor}", estilo_subtitulo))
-    story.append(Spacer(1, 15))
-    
-    # Tabla resumen
-    tabla_datos = [
-        [Paragraph("<b>Calificación Final:</b>", estilo_body), Paragraph(str(nota), estilo_body)],
-        [Paragraph("<b>Puntaje Obtenido:</b>", estilo_body), Paragraph(str(puntaje), estilo_body)]
+
+    story.append(Paragraph("Informe de Evaluación y Retroalimentación", title_style))
+    story.append(Spacer(1, 10))
+
+    data = [
+        [Paragraph("<b>Docente:</b>", body_style), Paragraph(nombre_docente, body_style)],
+        [Paragraph("<b>Estudiante:</b>", body_style), Paragraph(nombre_estudiante, body_style)],
+        [Paragraph("<b>Puntaje Obt.:</b>", body_style), Paragraph(str(puntaje), body_style)],
+        [Paragraph("<b>Nota Final:</b>", body_style), Paragraph(str(nota), body_style)]
     ]
     
-    t = Table(tabla_datos, colWidths=[150, 350])
+    t = Table(data, colWidths=[100, 400])
     t.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#F8FAFC')),
-        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#CBD5E1')),
         ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#E2E8F0')),
-        ('BOX', (0, 0), (-1, -1), 1, colors.HexColor('#CBD5E1')),
-        ('TOPPADDING', (0, 0), (-1, -1), 8),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('PADDING', (0, 0), (-1, -1), 6),
     ]))
+    
     story.append(t)
-    story.append(Spacer(1, 20))
+    story.append(Spacer(1, 15))
     
-    # Feedback Formativo
-    story.append(Paragraph("<b>Retroalimentación Detallada:</b>", estilo_subtitulo))
-    story.append(Spacer(1, 8))
+    story.append(Paragraph("<b>Detalle de Retroalimentación Formativa:</b>", body_style))
+    story.append(Spacer(1, 5))
     
-    lineas_feedback = feedback_texto.split('\n')
-    for linea in lineas_feedback:
+    lineas = feedback_texto.split('\n')
+    for linea in lineas:
         if linea.strip():
-            linea_pdf = linea.replace('**', '<b>').replace('**', '</b>').replace('*', '•')
-            story.append(Paragraph(linea_pdf, estilo_body))
+            story.append(Paragraph(linea.replace('<', '&lt;').replace('>', '&gt;'), body_style))
+        else:
             story.append(Spacer(1, 4))
             
     doc.build(story)
     buffer.seek(0)
-    return buffer
+    return buffer.getvalue()
 
-# ------------------------------------------------------------------------------
-# 4. GESTIÓN DEL REGISTRO LOCAL CSV Y EXCEL
-# ------------------------------------------------------------------------------
-def guardar_en_registro(profesor, nota, puntaje):
-    """Guarda los resultados en el archivo CSV local."""
-    nuevo_registro = pd.DataFrame([{
-        "Fecha": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "Profesor": profesor,
-        "Nota": nota,
-        "Puntaje": puntaje
-    }])
-    
-    if not os.path.exists(ARCHIVO_CSV):
-        nuevo_registro.to_csv(ARCHIVO_CSV, index=False)
-    else:
-        nuevo_registro.to_csv(ARCHIVO_CSV, mode='a', header=False, index=False)
+# -----------------------------------------------------------------------------
+# 5. INTERFAZ DE USUARIO STREAMLIT
+# -----------------------------------------------------------------------------
+def main():
+    st.title("📝 Corrector y Retroalimentador de Pruebas")
+    st.caption("Motor de Evaluación con NVIDIA NIM API")
 
-def cargar_registro():
-    """Lee el CSV ignorando filas mal compuestas o defectuosas."""
-    if os.path.exists(ARCHIVO_CSV):
-        try:
-            return pd.read_csv(ARCHIVO_CSV, on_bad_lines='skip')
-        except Exception:
-            return pd.DataFrame(columns=["Fecha", "Profesor", "Nota", "Puntaje"])
-    return pd.DataFrame(columns=["Fecha", "Profesor", "Nota", "Puntaje"])
+    col_izq, col_der = st.columns([1, 1], gap="large")
 
-# ------------------------------------------------------------------------------
-# 5. INTERFAZ STREAMLIT
-# ------------------------------------------------------------------------------
-st.title("Corrector y Retroalimentador de Pruebas")
+    with col_izq:
+        st.subheader("1. Configuración y Entradas")
+        
+        profesor = st.text_input("Nombre del Profesor/a", value="Prof. Carlos Mendoza")
+        estudiante = st.text_input("Nombre del Estudiante", value="Estudiante 1")
 
-col1, col2 = st.columns([1, 1])
-
-# --- COLUMNA 1: ENTRADAS DE EVALUACIÓN ---
-with col1:
-    st.subheader("1. Entradas de Evaluación")
-    
-    nombre_profesor = st.text_input("Nombre del Profesor/a", value="Augusth")
-    
-    st.markdown("**Sube la rúbrica (Imagen o PDF)**")
-    archivo_rubrica = st.file_uploader("Subir Rúbrica", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
-    
-    texto_rubrica = st.text_area("O pega el texto de la rúbrica aquí si no tienes archivo:", height=100)
-    
-    st.markdown("**Sube la prueba del alumno (PDF o Imagen)**")
-    archivo_prueba = st.file_uploader("Subir Prueba", type=["pdf", "png", "jpg", "jpeg"], label_visibility="collapsed")
-    
-    btn_evaluar = st.button("Evaluar y Calificar", type="primary", use_container_width=True)
-
-# --- COLUMNA 2: RESULTADOS Y PROCESAMIENTO ---
-with col2:
-    st.subheader("2. Resultado del Alumno")
-    
-    if btn_evaluar:
-        if not archivo_rubrica and not texto_rubrica.strip():
-            st.error("Por favor, proporciona una rúbrica (sube un archivo o escribe el texto).")
-        elif not archivo_prueba:
-            st.error("Por favor, sube el archivo de la prueba del alumno.")
+        st.markdown("---")
+        st.markdown("**Rúbrica de Evaluación**")
+        opcion_rubrica = st.radio("Formato de Rúbrica", ["Texto directo", "Archivo (Imagen/PDF)"], horizontal=True)
+        
+        rubrica_content = None
+        if opcion_rubrica == "Texto directo":
+            rubrica_content = st.text_area("Pegue la rúbrica aquí", height=150)
         else:
-            with st.spinner("Procesando evaluación con Gemini IA... Esto puede tomar unos segundos."):
-                try:
-                    contenidos_ia = []
-                    
-                    # Carga de Rúbrica
-                    if archivo_rubrica:
-                        bytes_rubrica = archivo_rubrica.read()
-                        contenidos_ia.append(types.Part.from_bytes(data=bytes_rubrica, mime_type=archivo_rubrica.type))
-                        contenidos_ia.append("Rúbrica de evaluación provista en el archivo adjunto arriba.")
-                    else:
-                        contenidos_ia.append(f"Rúbrica de evaluación en texto:\n{texto_rubrica}")
-                    
-                    # Carga de Prueba del Alumno
-                    bytes_prueba = archivo_prueba.read()
-                    contenidos_ia.append(types.Part.from_bytes(data=bytes_prueba, mime_type=archivo_prueba.type))
-                    contenidos_ia.append("Prueba resuelta por el estudiante provista en el archivo adjunto arriba.")
-                    
-                    instruccion_sistema = (
-                        "Eres un asistente pedagógico experto en corrección de evaluaciones académicas. "
-                        "Compara rigurosamente la prueba del alumno con la rúbrica entregada.\n\n"
-                        "DEBES ESTRUCTURAR TU RESPUESTA OBLIGATORIAMENTE DE LA SIGUIENTE MANERA:\n"
-                        "1. En la primera línea escribe solo: NOTA: [Valor de la nota final de 1.0 a 7.0 o de 0 a 100]\n"
-                        "2. En la segunda línea escribe solo: PUNTAJE: [Puntaje obtenido / Puntaje total]\n"
-                        "3. A partir de la tercera línea, entrega el FEEDBACK FORMATIVO detallado: fortalezas, "
-                        "errores cometidos, justificación de puntaje criterio por criterio y sugerencias concretas de mejora."
-                    )
-                    
-                    # Ejecución con control de reintentos
-                    resultado_texto = generar_evaluacion_con_reintentos(
-                        client=client,
-                        contenidos=contenidos_ia,
-                        system_instruction=instruccion_sistema
-                    )
-                    
-                    # Procesamiento de respuesta
-                    lineas = [l.strip() for l in resultado_texto.split('\n') if l.strip()]
-                    nota_extraida = "N/A"
-                    puntaje_extraido = "N/A"
-                    idx_inicio_feedback = 0
-                    
-                    for i, l in enumerate(lineas):
-                        if l.upper().startswith("NOTA:"):
-                            nota_extraida = l.split(":", 1)[1].strip()
-                        elif l.upper().startswith("PUNTAJE:"):
-                            puntaje_extraido = l.split(":", 1)[1].strip()
-                            idx_inicio_feedback = i + 1
-                    
-                    feedback_completo = "\n\n".join(lineas[idx_inicio_feedback:]) if idx_inicio_feedback > 0 else resultado_texto
-                    
-                    # Registro de datos
-                    guardar_en_registro(nombre_profesor, nota_extraida, puntaje_extraido)
-                    
-                    # Despliegue en interfaz
-                    m1, m2 = st.columns(2)
-                    m1.metric("Nota Final", nota_extraida)
-                    m2.metric("Puntaje", puntaje_extraido)
-                    
-                    st.markdown("### Feedback Formativo")
-                    st.markdown(feedback_completo)
-                    
-                    # Generación de PDF
-                    pdf_bytes = generar_reporte_pdf(
-                        profesor=nombre_profesor,
-                        nota=nota_extraida,
-                        puntaje=puntaje_extraido,
-                        feedback_texto=feedback_completo
-                    )
-                    
-                    st.download_button(
-                        label="📄 Descargar Informe PDF",
-                        data=pdf_bytes,
-                        file_name=f"Informe_Evaluacion_{nombre_profesor}.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                    
-                except Exception as ex:
-                    st.error(f"Error durante el proceso: {ex}")
+            rubrica_file = st.file_uploader("Subir Rúbrica (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
+            if rubrica_file:
+                rubrica_content = procesar_archivo_a_texto_o_b64(rubrica_file)
 
-# ------------------------------------------------------------------------------
-# 6. PLANILLA CONSOLIDADA DE EVALUACIONES
-# ------------------------------------------------------------------------------
-st.markdown("---")
-st.subheader("Planilla Consolidada de Evaluaciones")
+        st.markdown("---")
+        st.markdown("**Prueba del Estudiante**")
+        prueba_file = st.file_uploader("Subir Prueba (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="prueba_file")
+        prueba_content = procesar_archivo_a_texto_o_b64(prueba_file) if prueba_file else None
 
-df_registro = cargar_registro()
+        btn_evaluar = st.button("🚀 Evaluar Prueba", use_container_width=True, type="primary")
 
-if not df_registro.empty:
-    st.dataframe(df_registro, use_container_width=True)
+    with col_der:
+        st.subheader("2. Resultado de la Evaluación")
+        
+        if btn_evaluar:
+            if not rubrica_content:
+                st.warning("Debe ingresar o adjuntar una rúbrica.")
+                return
+            if not prueba_content:
+                st.warning("Debe adjuntar la prueba del estudiante.")
+                return
+
+            client = get_nvidia_client()
+            
+            prompt_sistema = """
+            Eres un asistente docente experto en evaluación educativa.
+            Analiza la rúbrica entregada y la prueba del estudiante.
+            
+            Debes entregar la respuesta con la siguiente estructura exacta al inicio:
+            NOTA: [Nota obtenida, ej: 6.5]
+            PUNTAJE: [Puntaje obtenido / Puntaje total, ej: 28/30]
+            
+            Posteriormente, detalla el feedback formativo estructurado:
+            - Fortalezas observadas.
+            - Aspectos a mejorar según la rúbrica.
+            - Sugerencias concretas para el estudiante.
+            """
+            
+            with st.spinner("Analizando evaluación con NVIDIA NIM..."):
+                resultado = generar_evaluacion_nvidia(client, prompt_sistema, rubrica_content, prueba_content)
+                
+            if resultado:
+                st.session_state["ultimo_resultado"] = resultado
+                st.session_state["ultimo_estudiante"] = estudiante
+                st.session_state["ultimo_profesor"] = profesor
+
+                nota_val = "N/A"
+                puntaje_val = "N/A"
+                for line in resultado.split('\n'):
+                    if line.startswith("NOTA:"):
+                        nota_val = line.replace("NOTA:", "").strip()
+                    elif line.startswith("PUNTAJE:"):
+                        puntaje_val = line.replace("PUNTAJE:", "").strip()
+
+                st.session_state["ultima_nota"] = nota_val
+                st.session_state["ultimo_puntaje"] = puntaje_val
+
+                df_actual = cargar_registro()
+                nuevo_registro = pd.DataFrame([{
+                    "Docente": profesor,
+                    "Estudiante": estudiante,
+                    "Puntaje": puntaje_val,
+                    "Nota": nota_val,
+                    "Fecha": time.strftime("%Y-%m-%d %H:%M:%S")
+                }])
+                df_actual = pd.concat([df_actual, nuevo_registro], ignore_index=True)
+                guardar_registro(df_actual)
+
+        if "ultimo_resultado" in st.session_state:
+            st.success("Evaluación completada con éxito.")
+            
+            m1, m2 = st.columns(2)
+            m1.metric("Nota Obtenida", st.session_state.get("ultima_nota", "N/A"))
+            m2.metric("Puntaje Obt.", st.session_state.get("ultimo_puntaje", "N/A"))
+
+            st.markdown("### Retroalimentación Formativa")
+            st.write(st.session_state["ultimo_resultado"])
+
+            pdf_bytes = generar_pdf_informe(
+                st.session_state.get("ultimo_profesor", profesor),
+                st.session_state.get("ultimo_estudiante", estudiante),
+                st.session_state.get("ultima_nota", "N/A"),
+                st.session_state.get("ultimo_puntaje", "N/A"),
+                st.session_state["ultimo_resultado"]
+            )
+            
+            st.download_button(
+                label="📄 Descargar Informe PDF",
+                data=pdf_bytes,
+                file_name=f"Informe_{st.session_state.get('ultimo_estudiante', 'Estudiante')}.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+
+    st.markdown("---")
+    st.subheader("📊 Registro Acumulado de Calificaciones")
     
-    buffer_excel = io.BytesIO()
-    with pd.ExcelWriter(buffer_excel, engine='openpyxl') as writer:
-        df_registro.to_excel(writer, index=False, sheet_name='Calificaciones')
-    buffer_excel.seek(0)
-    
-    st.download_button(
-        label="📊 Exportar Planilla a Excel",
-        data=buffer_excel,
-        file_name="registro_calificaciones.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-else:
-    st.info("Aún no hay calificaciones registradas. Aparecerán automáticamente al evaluar.")
+    df_registro = cargar_registro()
+    if not df_registro.empty:
+        st.dataframe(df_registro, use_container_width=True)
+        excel_data = exportar_excel(df_registro)
+        st.download_button(
+            label="📥 Exportar Registro a Excel (.xlsx)",
+            data=excel_data,
+            file_name="registro_calificaciones.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.info("Aún no hay calificaciones registradas.")
+
+if __name__ == "__main__":
+    main()
