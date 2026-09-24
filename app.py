@@ -1,13 +1,13 @@
 import os
 import time
 import io
-import base64
 import pandas as pd
 import streamlit as st
-from openai import OpenAI
 
-# Librerías para procesamiento de PDF e Imágenes
-from pypdf import PdfReader
+# SDK Oficial google-genai
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 
 # Librerías para generación de PDF en ReportLab
 from reportlab.lib.pagesizes import letter
@@ -16,7 +16,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS NATIVOS
 # -----------------------------------------------------------------------------
 st.set_page_config(
     page_title="Corrector y Retroalimentador de Pruebas",
@@ -25,80 +25,55 @@ st.set_page_config(
 )
 
 CSV_FILE = "registro_calificaciones.csv"
-MODEL_NVIDIA = "deepseek-ai/deepseek-v4.1-flash"
 
 # -----------------------------------------------------------------------------
-# 2. CLIENTE NVIDIA NIM Y AUXILIARES DE ARCHIVO
+# 2. CLIENTE GEMINI Y BUCLE DE REINTENTOS ESCALONADOS
 # -----------------------------------------------------------------------------
-def get_nvidia_client():
-    api_key = st.secrets.get("NVIDIA_API_KEY")
+def get_gemini_client():
+    api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
-        st.error("No se encontró 'NVIDIA_API_KEY' en los Secrets de Streamlit.")
+        st.error("No se encontró 'GEMINI_API_KEY' en los Secrets de Streamlit.")
         st.stop()
-    return OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=api_key
-    )
+    return genai.Client(api_key=api_key)
 
-def extraer_texto_o_base64(file_bytes, filename, mime_type):
+def generar_evaluacion_con_reintentos(client, contents, prompt_sistema, max_retries=3):
     """
-    Si es PDF, extrae el texto. Si es imagen, genera una cadena Base64.
+    Realiza llamadas al modelo gemini-3.6-flash optimizado para respuestas
+    multimodales rápidas y reintentos en caso de saturación puntual (503/429).
     """
-    if "pdf" in mime_type.lower() or filename.lower().endswith(".pdf"):
-        try:
-            reader = PdfReader(io.BytesIO(file_bytes))
-            texto = ""
-            for page in reader.pages:
-                t = page.extract_text()
-                if t:
-                    texto += t + "\n"
-            return "text", texto if texto.strip() else "No se pudo extraer texto seleccionable del PDF."
-        except Exception as e:
-            return "text", f"Error al leer PDF: {e}"
-    else:
-        # Es una imagen (PNG / JPG)
-        b64_img = base64.b64encode(file_bytes).decode("utf-8")
-        data_url = f"data:{mime_type};base64,{b64_img}"
-        return "image_url", data_url
-
-def generar_evaluacion_nvidia(client, prompt_sistema, rubrica_data, prueba_data):
-    messages_payload = [{"role": "system", "content": prompt_sistema}]
+    model_id = "gemini-3.6-flash"
     
-    content_user = []
-    
-    # 1. Agregar Rúbrica
-    tipo_r, val_r = rubrica_data
-    if tipo_r == "text":
-        content_user.append({"type": "text", "text": f"--- RÚBRICA DE EVALUACIÓN ---\n{val_r}"})
-    elif tipo_r == "image_url":
-        content_user.append({"type": "text", "text": "--- RÚBRICA EN IMAGEN ---"})
-        content_user.append({"type": "image_url", "image_url": {"url": val_r}})
-        
-    # 2. Agregar Prueba del Estudiante
-    tipo_p, val_p = prueba_data
-    if tipo_p == "text":
-        content_user.append({"type": "text", "text": f"--- PRUEBA DEL ESTUDIANTE ---\n{val_p}"})
-    elif tipo_p == "image_url":
-        content_user.append({"type": "text", "text": "--- PRUEBA EN IMAGEN ---"})
-        content_user.append({"type": "image_url", "image_url": {"url": val_p}})
-
-    messages_payload.append({"role": "user", "content": content_user})
-
-    for intento in range(3):
+    for intento in range(max_retries):
         try:
-            response = client.chat.completions.create(
-                model=MODEL_NVIDIA,
-                messages=messages_payload,
-                temperature=0.2,
-                max_tokens=2048
+            response = client.models.generate_content(
+                model=model_id,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    system_instruction=prompt_sistema,
+                    temperature=0.2
+                )
             )
-            return response.choices[0].message.content
-        except Exception as e:
-            if "429" in str(e) or "503" in str(e):
-                if intento < 2:
-                    time.sleep((intento + 1) * 3)
+            return response.text
+        except APIError as e:
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                if intento < max_retries - 1:
+                    time.sleep((intento + 1) * 2)
                     continue
-            st.error(f"Error en la API de NVIDIA: {e}")
+                else:
+                    st.error("⚠️ Se ha alcanzado el límite de cuota temporal de la API.")
+                    return None
+            elif "503" in str(e):
+                if intento < max_retries - 1:
+                    time.sleep(2)
+                    continue
+                else:
+                    st.error("⚠️ El servicio está temporalmente saturado (503). Inténtalo más tarde.")
+                    return None
+            else:
+                st.error(f"Error en la API de Google Gemini: {e}")
+                return None
+        except Exception as ex:
+            st.error(f"Error inesperado: {ex}")
             return None
     return None
 
@@ -202,7 +177,7 @@ def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedba
 # -----------------------------------------------------------------------------
 def main():
     st.title("📝 Corrector y Retroalimentador de Pruebas")
-    st.caption("Motor de Evaluación con NVIDIA NIM API (DeepSeek V4.1 Flash)")
+    st.caption("Motor de Evaluación con Google Gemini API (gemini-3.6-flash)")
 
     col_izq, col_der = st.columns([1, 1], gap="large")
 
@@ -216,25 +191,23 @@ def main():
         st.markdown("**Rúbrica de Evaluación**")
         opcion_rubrica = st.radio("Formato de Rúbrica", ["Texto directo", "Archivo (Imagen/PDF)"], horizontal=True)
         
-        rubrica_data = None
+        rubrica_content = None
         if opcion_rubrica == "Texto directo":
-            rubrica_txt = st.text_area("Pegue la rúbrica aquí", height=150)
-            if rubrica_txt.strip():
-                rubrica_data = ("text", rubrica_txt)
+            rubrica_content = st.text_area("Pegue la rúbrica aquí", height=150)
         else:
             rubrica_file = st.file_uploader("Subir Rúbrica (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
             if rubrica_file:
-                bytes_r = rubrica_file.read()
-                rubrica_data = extraer_texto_o_base64(bytes_r, rubrica_file.name, rubrica_file.type)
+                rubrica_bytes = rubrica_file.read()
+                rubrica_content = types.Part.from_bytes(data=rubrica_bytes, mime_type=rubrica_file.type)
 
         st.markdown("---")
         st.markdown("**Prueba del Estudiante**")
         prueba_file = st.file_uploader("Subir Prueba (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="prueba_file")
         
-        prueba_data = None
+        prueba_part = None
         if prueba_file:
-            bytes_p = prueba_file.read()
-            prueba_data = extraer_texto_o_base64(bytes_p, prueba_file.name, prueba_file.type)
+            prueba_bytes = prueba_file.read()
+            prueba_part = types.Part.from_bytes(data=prueba_bytes, mime_type=prueba_file.type)
 
         btn_evaluar = st.button("🚀 Evaluar Prueba", use_container_width=True, type="primary")
 
@@ -242,14 +215,14 @@ def main():
         st.subheader("2. Resultado de la Evaluación")
         
         if btn_evaluar:
-            if not rubrica_data:
+            if not rubrica_content:
                 st.warning("Debe ingresar o adjuntar una rúbrica.")
                 return
-            if not prueba_data:
+            if not prueba_part:
                 st.warning("Debe adjuntar la prueba del estudiante.")
                 return
 
-            client = get_nvidia_client()
+            client = get_gemini_client()
             
             prompt_sistema = """
             Eres un asistente docente experto en evaluación educativa.
@@ -265,8 +238,16 @@ def main():
             - Sugerencias concretas para el estudiante.
             """
 
-            with st.spinner("Analizando la prueba con NVIDIA NIM..."):
-                resultado = generar_evaluacion_nvidia(client, prompt_sistema, rubrica_data, prueba_data)
+            contents = []
+            if isinstance(rubrica_content, str):
+                contents.append(f"RÚBRICA DE EVALUACIÓN:\n{rubrica_content}")
+            else:
+                contents.append(rubrica_content)
+                
+            contents.append(prueba_part)
+            
+            with st.spinner("Analizando la prueba y generando retroalimentación..."):
+                resultado = generar_evaluacion_con_reintentos(client, contents, prompt_sistema)
                 
             if resultado:
                 st.session_state["ultimo_resultado"] = resultado
