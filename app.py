@@ -7,8 +7,6 @@ import streamlit as st
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError
-from groq import Groq
-import pypdf
 
 from reportlab.lib.pagesizes import letter
 from reportlab.lib import colors
@@ -23,88 +21,64 @@ st.set_page_config(
     layout="wide"
 )
 
-# Recuperación segura de API Keys desde Streamlit Secrets
-gemini_key = st.secrets.get("GEMINI_API_KEY")
-groq_key = st.secrets.get("GROQ_API_KEY")
-
-if not gemini_key:
+# Recuperación segura de la API Key desde Streamlit Secrets
+api_key = st.secrets.get("GEMINI_API_KEY")
+if not api_key:
     st.error("Error: No se ha configurado 'GEMINI_API_KEY' en los Secrets de Streamlit.")
     st.stop()
 
-# Clientes de IA
-client_gemini = genai.Client(api_key=gemini_key)
-client_groq = Groq(api_key=groq_key) if groq_key else None
+# Inicialización del cliente oficial de Google GenAI
+client = genai.Client(api_key=api_key)
 
-MODELO_GEMINI = "gemini-3.6-flash"
-MODELO_GROQ = "llama-3.3-70b-versatile"
+MODELO_ACTIVO = "gemini-3.6-flash"
 ARCHIVO_CSV = "registro_calificaciones.csv"
 
 # ------------------------------------------------------------------------------
-# 2. FUNCIONES AUXILIARES DE EXTRACCIÓN DE TEXTO
+# 2. PROCESAMIENTO ROBUSTO DE IA (REINTENTOS ROBUSTOS PARA ERROR 503)
 # ------------------------------------------------------------------------------
-def extraer_texto_pdf(archivo_bytes):
-    """Extrae texto legible de un archivo PDF subido."""
-    try:
-        reader = pypdf.PdfReader(io.BytesIO(archivo_bytes))
-        texto = ""
-        for page in reader.pages:
-            t = page.extract_text()
-            if t:
-                texto += t + "\n"
-        return texto.strip()
-    except Exception:
-        return ""
-
-# ------------------------------------------------------------------------------
-# 3. MOTOR DUAL DE EVALUACIÓN (GEMINI CON FAILOVER A GROQ)
-# ------------------------------------------------------------------------------
-def evaluar_con_ia_multiservidor(contenidos_gemini, texto_prompts_groq, system_instruction):
+def generar_evaluacion_con_reintentos(client, contenidos, system_instruction, max_reintentos=6):
     """
-    Intenta la evaluación con Gemini. Si responde 503/429 (saturación), 
-    conmuta automáticamente a Groq (Llama-3.3-70b).
+    Ejecuta peticiones utilizando gemini-3.6-flash con backoff exponencial y jitter.
+    Captura sobrecargas 503/429 e insiste con tiempos de espera progresivos antes de fallar.
     """
-    # INTENTO 1: GOOGLE GEMINI
-    try:
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=0.2
-        )
-        response = client_gemini.models.generate_content(
-            model=MODELO_GEMINI,
-            contents=contenidos_gemini,
-            config=config
-        )
-        return response.text, "Google Gemini 3.6 Flash"
-        
-    except APIError as e:
-        es_saturacion = (e.code == 503 or e.code == 429 or "UNAVAILABLE" in str(e) or "high demand" in str(e))
-        if not es_saturacion:
-            raise e
-        st.toast("⚠️ Servidor Gemini saturado (Error 503). Conmutando a Servidor Secundario (Groq LPU)...", icon="🔄")
-    except Exception as e:
-        st.toast("⚠️ Error en Gemini. Conmutando a Servidor Secundario (Groq LPU)...", icon="🔄")
-
-    # INTENTO 2: GROQ (RESPALDO DE ALTA DISPONIBILIDAD)
-    if client_groq:
+    for intento in range(1, max_reintentos + 1):
         try:
-            prompt_completo = f"{system_instruction}\n\n--- DOCUMENTOS Y DATOS DE LA PRUEBA ---\n{texto_prompts_groq}"
-            completion = client_groq.chat.completions.create(
-                model=MODELO_GROQ,
-                messages=[{"role": "user", "content": prompt_completo}],
-                temperature=0.2,
-                max_tokens=2048
+            config = types.GenerateContentConfig(
+                system_instruction=system_instruction,
+                temperature=0.2
             )
-            return completion.choices[0].message.content, "Groq / Llama-3.3-70b (Servidor Secundario)"
-        except Exception as groq_err:
-            raise RuntimeError(f"Ambos servidores fallaron. Error en servidor secundario: {groq_err}")
-    else:
-        raise RuntimeError("El servidor de Google está saturado (503) y no se configuró 'GROQ_API_KEY' de respaldo.")
+            
+            response = client.models.generate_content(
+                model=MODELO_ACTIVO,
+                contents=contenidos,
+                config=config
+            )
+            return response.text
+        
+        except APIError as e:
+            # Detección de errores de servidor ocupado (503) o límites de tasa (429)
+            es_saturacion = (e.code == 503 or e.code == 429 or "UNAVAILABLE" in str(e) or "high demand" in str(e))
+            
+            if es_saturacion and intento < max_reintentos:
+                # Tiempo de espera incremental + pequeña fluctuación aleatoria para evitar colisiones
+                tiempo_espera = (2 ** intento) + random.uniform(1.0, 3.0)
+                st.toast(
+                    f"Servidor ocupado (503). Reintento {intento}/{max_reintentos} en {tiempo_espera:.1f}s...", 
+                    icon="⏳"
+                )
+                time.sleep(tiempo_espera)
+            else:
+                raise e
+        except Exception as e:
+            raise e
+            
+    raise RuntimeError("El servidor de Google se encuentra saturado en este momento. Por favor, reintenta en unos instantes.")
 
 # ------------------------------------------------------------------------------
-# 4. GENERACIÓN DE REPORTES EN PDF (REPORTLAB)
+# 3. GENERACIÓN DE REPORTES EN PDF (REPORTLAB)
 # ------------------------------------------------------------------------------
 def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
-    """Genera un archivo PDF con formato profesional e identificadores explícitos."""
+    """Genera un informe PDF profesional especificando metadatos de autoría."""
     buffer = io.BytesIO()
     
     doc = SimpleDocTemplate(
@@ -126,10 +100,12 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
     
     story = []
     
+    # Encabezado
     story.append(Paragraph("Informe de Evaluación y Retroalimentación", estilo_titulo))
     story.append(Paragraph(f"<b>Evaluador/a:</b> {profesor}", estilo_subtitulo))
     story.append(Spacer(1, 15))
     
+    # Tabla resumen
     tabla_datos = [
         [Paragraph("<b>Calificación Final:</b>", estilo_body), Paragraph(str(nota), estilo_body)],
         [Paragraph("<b>Puntaje Obtenido:</b>", estilo_body), Paragraph(str(puntaje), estilo_body)]
@@ -148,6 +124,7 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
     story.append(t)
     story.append(Spacer(1, 20))
     
+    # Feedback Formativo
     story.append(Paragraph("<b>Retroalimentación Detallada:</b>", estilo_subtitulo))
     story.append(Spacer(1, 8))
     
@@ -163,10 +140,10 @@ def generar_reporte_pdf(profesor, nota, puntaje, feedback_texto):
     return buffer
 
 # ------------------------------------------------------------------------------
-# 5. GESTIÓN DEL REGISTRO LOCAL CSV Y EXCEL
+# 4. GESTIÓN DEL REGISTRO LOCAL CSV Y EXCEL
 # ------------------------------------------------------------------------------
 def guardar_en_registro(profesor, nota, puntaje):
-    """Registra la evaluación en el archivo CSV local."""
+    """Guarda los resultados en el archivo CSV local."""
     nuevo_registro = pd.DataFrame([{
         "Fecha": time.strftime("%Y-%m-%d %H:%M:%S"),
         "Profesor": profesor,
@@ -180,7 +157,7 @@ def guardar_en_registro(profesor, nota, puntaje):
         nuevo_registro.to_csv(ARCHIVO_CSV, mode='a', header=False, index=False)
 
 def cargar_registro():
-    """Carga el historial ignorando líneas corruptas si existieran."""
+    """Lee el CSV ignorando filas mal compuestas o defectuosas."""
     if os.path.exists(ARCHIVO_CSV):
         try:
             return pd.read_csv(ARCHIVO_CSV, on_bad_lines='skip')
@@ -189,7 +166,7 @@ def cargar_registro():
     return pd.DataFrame(columns=["Fecha", "Profesor", "Nota", "Puntaje"])
 
 # ------------------------------------------------------------------------------
-# 6. INTERFAZ STREAMLIT
+# 5. INTERFAZ STREAMLIT
 # ------------------------------------------------------------------------------
 st.title("Corrector y Retroalimentador de Pruebas")
 
@@ -221,37 +198,22 @@ with col2:
         elif not archivo_prueba:
             st.error("Por favor, sube el archivo de la prueba del alumno.")
         else:
-            with st.spinner("Procesando evaluación... Evaluando redundancia de servidores."):
+            with st.spinner("Procesando evaluación con Gemini IA... Esto puede tomar unos segundos."):
                 try:
-                    contenidos_gemini = []
-                    texto_groq = ""
+                    contenidos_ia = []
                     
-                    # PROCESAMIENTO DE RÚBRICA
+                    # Carga de Rúbrica
                     if archivo_rubrica:
                         bytes_rubrica = archivo_rubrica.read()
-                        contenidos_gemini.append(types.Part.from_bytes(data=bytes_rubrica, mime_type=archivo_rubrica.type))
-                        contenidos_gemini.append("Rúbrica de evaluación provista en el archivo adjunto arriba.")
-                        
-                        # Extracción para Groq si es PDF
-                        if archivo_rubrica.type == "application/pdf":
-                            txt = extraer_texto_pdf(bytes_rubrica)
-                            texto_groq += f"\n--- TEXTO DE RÚBRICA ---\n{txt}\n"
-                        else:
-                            texto_groq += "\n--- RÚBRICA ---\n(Rúbrica proporcionada en imagen)\n"
+                        contenidos_ia.append(types.Part.from_bytes(data=bytes_rubrica, mime_type=archivo_rubrica.type))
+                        contenidos_ia.append("Rúbrica de evaluación provista en el archivo adjunto arriba.")
                     else:
-                        contenidos_gemini.append(f"Rúbrica de evaluación en texto:\n{texto_rubrica}")
-                        texto_groq += f"\n--- TEXTO DE RÚBRICA ---\n{texto_rubrica}\n"
+                        contenidos_ia.append(f"Rúbrica de evaluación en texto:\n{texto_rubrica}")
                     
-                    # PROCESAMIENTO DE PRUEBA
+                    # Carga de Prueba del Alumno
                     bytes_prueba = archivo_prueba.read()
-                    contenidos_gemini.append(types.Part.from_bytes(data=bytes_prueba, mime_type=archivo_prueba.type))
-                    contenidos_gemini.append("Prueba resuelta por el estudiante provista en el archivo adjunto arriba.")
-                    
-                    if archivo_prueba.type == "application/pdf":
-                        txt_p = extraer_texto_pdf(bytes_prueba)
-                        texto_groq += f"\n--- RESPUESTAS DEL ESTUDIANTE ---\n{txt_p}\n"
-                    else:
-                        texto_groq += "\n--- RESPUESTAS DEL ESTUDIANTE ---\n(Respuestas en formato imagen)\n"
+                    contenidos_ia.append(types.Part.from_bytes(data=bytes_prueba, mime_type=archivo_prueba.type))
+                    contenidos_ia.append("Prueba resuelta por el estudiante provista en el archivo adjunto arriba.")
                     
                     instruccion_sistema = (
                         "Eres un asistente pedagógico experto en corrección de evaluaciones académicas. "
@@ -263,14 +225,14 @@ with col2:
                         "errores cometidos, justificación de puntaje criterio por criterio y sugerencias concretas de mejora."
                     )
                     
-                    # Ejecución multiservidor con failover
-                    resultado_texto, servidor_usado = evaluar_con_ia_multiservidor(
-                        contenidos_gemini=contenidos_gemini,
-                        texto_prompts_groq=texto_groq,
+                    # Ejecución con control de reintentos
+                    resultado_texto = generar_evaluacion_con_reintentos(
+                        client=client,
+                        contenidos=contenidos_ia,
                         system_instruction=instruccion_sistema
                     )
                     
-                    # Procesamiento de la respuesta
+                    # Procesamiento de respuesta
                     lineas = [l.strip() for l in resultado_texto.split('\n') if l.strip()]
                     nota_extraida = "N/A"
                     puntaje_extraido = "N/A"
@@ -285,12 +247,10 @@ with col2:
                     
                     feedback_completo = "\n\n".join(lineas[idx_inicio_feedback:]) if idx_inicio_feedback > 0 else resultado_texto
                     
-                    # Guardar registro
+                    # Registro de datos
                     guardar_en_registro(nombre_profesor, nota_extraida, puntaje_extraido)
                     
-                    # Interfaz de resultados
-                    st.success(f"Evaluación procesada exitosamente usando: **{servidor_usado}**")
-                    
+                    # Despliegue en interfaz
                     m1, m2 = st.columns(2)
                     m1.metric("Nota Final", nota_extraida)
                     m2.metric("Puntaje", puntaje_extraido)
@@ -298,7 +258,7 @@ with col2:
                     st.markdown("### Feedback Formativo")
                     st.markdown(feedback_completo)
                     
-                    # Generación PDF
+                    # Generación de PDF
                     pdf_bytes = generar_reporte_pdf(
                         profesor=nombre_profesor,
                         nota=nota_extraida,
@@ -318,7 +278,7 @@ with col2:
                     st.error(f"Error durante el proceso: {ex}")
 
 # ------------------------------------------------------------------------------
-# 7. PLANILLA CONSOLIDADA DE EVALUACIONES
+# 6. PLANILLA CONSOLIDADA DE EVALUACIONES
 # ------------------------------------------------------------------------------
 st.markdown("---")
 st.subheader("Planilla Consolidada de Evaluaciones")
