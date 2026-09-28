@@ -16,13 +16,92 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 
 # -----------------------------------------------------------------------------
-# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS NATIVOS
+# 1. CONFIGURACIÓN DE PÁGINA Y ESTILOS VISUALES PREMIUM (CSS)
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Corrector y Retroalimentador de Pruebas",
+    page_title="EduEvalua AI - Corrector Profesional",
+    page_icon="📝",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
+
+# Inyección de CSS para transformar la interfaz estándar de Streamlit
+st.markdown("""
+    <style>
+    /* Fondo general y fuentes */
+    @import url('https://googleapis.com');
+    
+    html, body, [data-testid="stAppViewContainer"] {
+        font-family: 'Inter', sans-serif;
+        background-color: #0F172A; /* Fondo oscuro moderno (Slate 900) */
+        color: #F8FAFC;
+    }
+    
+    /* Encabezados */
+    h1 {
+        font-weight: 700 !important;
+        color: #FFFFFF !important;
+        letter-spacing: -0.02em;
+    }
+    h3 {
+        font-weight: 600 !important;
+        color: #38BDF8 !important; /* Celeste tecnológico */
+        margin-bottom: 15px !important;
+    }
+    
+    /* Contenedores y Tarjetas (Cards) */
+    div[data-testid="stColumn"] {
+        background-color: #1E293B; /* Fondo de tarjetas (Slate 800) */
+        padding: 24px !important;
+        border-radius: 16px !important;
+        border: 1px solid #334155;
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+    }
+    
+    /* Estilizar subidores de archivos (File Uploader) */
+    div[data-testid="stFileUploader"] {
+        background-color: #0F172A;
+        border: 2px dashed #475569 !important;
+        border-radius: 12px !important;
+        padding: 10px;
+    }
+    
+    /* Inputs de texto */
+    input {
+        background-color: #0F172A !important;
+        color: #FFFFFF !important;
+        border: 1px solid #475569 !important;
+        border-radius: 8px !important;
+    }
+    
+    /* Tarjetas de Métricas customizadas (Nota y Puntaje) */
+    .metric-card {
+        background: linear-gradient(135deg, #1E293B 0%, #0F172A 100%);
+        border: 1px solid #38BDF8;
+        border-radius: 12px;
+        padding: 20px;
+        text-align: center;
+        box-shadow: 0 10px 15px -3px rgba(56, 189, 248, 0.1);
+    }
+    .metric-title {
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+        color: #94A3B8;
+        margin-bottom: 5px;
+    }
+    .metric-value {
+        font-size: 36px;
+        font-weight: 700;
+        color: #38BDF8;
+    }
+    
+    /* Modificaciones de espaciados nativos de Streamlit */
+    block-container {
+        padding-top: 2rem !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
 
 CSV_FILE = "registro_calificaciones.csv"
 
@@ -37,12 +116,7 @@ def get_gemini_client():
     return genai.Client(api_key=api_key)
 
 def generar_evaluacion_con_reintentos(client, contents, prompt_sistema, max_retries=3):
-    """
-    Realiza llamadas al modelo gemini-3.6-flash optimizado para respuestas
-    multimodales rápidas y reintentos en caso de saturación puntual (503/429).
-    """
     model_id = "gemini-3.6-flash"
-    
     for intento in range(max_retries):
         try:
             response = client.models.generate_content(
@@ -103,42 +177,23 @@ def exportar_excel(df):
 # -----------------------------------------------------------------------------
 def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedback_texto):
     buffer = io.BytesIO()
-    
     doc = SimpleDocTemplate(
         buffer,
         pagesize=letter,
-        rightMargin=40,
-        leftMargin=40,
-        topMargin=40,
-        bottomMargin=40,
+        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40,
         title=f"Informe de Evaluación - {nombre_estudiante}",
         author=nombre_docente if nombre_docente else "Docente Evaluador"
     )
     
     styles = getSampleStyleSheet()
-    
     title_style = ParagraphStyle(
-        'DocTitle',
-        parent=styles['Heading1'],
-        fontSize=18,
-        leading=22,
-        textColor=colors.HexColor('#1E293B'),
-        spaceAfter=12
+        'DocTitle', parent=styles['Heading1'], fontSize=18, leading=22, textColor=colors.HexColor('#1E293B'), spaceAfter=12
     )
-    
     body_style = ParagraphStyle(
-        'DocBody',
-        parent=styles['Normal'],
-        fontSize=10,
-        leading=14,
-        textColor=colors.HexColor('#334155'),
-        spaceAfter=8
+        'DocBody', parent=styles['Normal'], fontSize=10, leading=14, textColor=colors.HexColor('#334155'), spaceAfter=8
     )
 
-    story = []
-
-    story.append(Paragraph("Informe de Evaluación y Retroalimentación", title_style))
-    story.append(Spacer(1, 10))
+    story = [Paragraph("Informe de Evaluación y Retroalimentación", title_style), Spacer(1, 10)]
 
     data = [
         [Paragraph("<b>Docente:</b>", body_style), Paragraph(nombre_docente if nombre_docente else "No especificado", body_style)],
@@ -157,12 +212,10 @@ def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedba
     
     story.append(t)
     story.append(Spacer(1, 15))
-    
     story.append(Paragraph("<b>Detalle de Retroalimentación Formativa:</b>", body_style))
     story.append(Spacer(1, 5))
     
-    lineas = feedback_texto.split('\n')
-    for linea in lineas:
+    for linea in feedback_texto.split('\n'):
         if linea.strip():
             story.append(Paragraph(linea.replace('<', '&lt;').replace('>', '&gt;'), body_style))
         else:
@@ -173,155 +226,31 @@ def generar_pdf_informe(nombre_docente, nombre_estudiante, nota, puntaje, feedba
     return buffer.getvalue()
 
 # -----------------------------------------------------------------------------
-# 5. INTERFAZ DE USUARIO STREAMLIT (LAYOUT DOS COLUMNAS)
+# 5. INTERFAZ DE USUARIO (UX/UI REDEFINIDA)
 # -----------------------------------------------------------------------------
 def main():
-    st.title("📝 Corrector y Retroalimentador de Pruebas")
-    st.caption("Motor de Evaluación con Google Gemini API (gemini-3.6-flash)")
+    # Encabezado Premium estilizado con HTML
+    st.markdown("""
+        <div style='text-align: center; padding-bottom: 25px;'>
+            <h1 style='margin-bottom: 0px;'>✨ EduEvalua AI</h1>
+            <p style='color: #94A3B8; font-size: 16px; margin-top: 5px;'>Sistemas Avanzados de Retroalimentación Docente con Inteligencia Artificial</p>
+        </div>
+    """, unsafe_allow_html=True)
 
     col_izq, col_der = st.columns([1, 1], gap="large")
 
     with col_izq:
-        st.subheader("1. Configuración y Entradas")
+        st.subheader("🛠️ Configuración y Entradas")
         
-        profesor = st.text_input("Nombre del Profesor/a", placeholder="Ingrese su nombre aquí...")
-        estudiante = st.text_input("Nombre del Estudiante", placeholder="Ingrese nombre del estudiante...")
+        profesor = st.text_input("Nombre del Profesor/a", placeholder="Ej. Carlos Mendoza")
+        estudiante = st.text_input("Nombre del Estudiante", placeholder="Ej. Francisca Silva")
 
-        st.markdown("---")
-        st.markdown("**Rúbrica de Evaluación**")
-        opcion_rubrica = st.radio("Formato de Rúbrica", ["Texto directo", "Archivo (Imagen/PDF)"], horizontal=True)
+        st.markdown("<br><p style='font-weight:600; color:#94A3B8; margin-bottom:5px;'>Rúbrica de Evaluación</p>", unsafe_allow_html=True)
+        opcion_rubrica = st.radio("Seleccione formato", ["Texto directo", "Archivo (Imagen/PDF)"], horizontal=True, label_visibility="collapsed")
         
         rubrica_content = None
         if opcion_rubrica == "Texto directo":
-            rubrica_content = st.text_area("Pegue la rúbrica aquí", height=150)
+            rubrica_content = st.text_area("Pegue la rúbrica detallada aquí", height=120, placeholder="Escriba los criterios o pegue la tabla de evaluación...")
         else:
-            rubrica_file = st.file_uploader("Subir Rúbrica (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
+            rubrica_file = st.file_uploader("Subir Rúbrica", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
             if rubrica_file:
-                rubrica_bytes = rubrica_file.read()
-                rubrica_content = types.Part.from_bytes(data=rubrica_bytes, mime_type=rubrica_file.type)
-
-        st.markdown("---")
-        st.markdown("**Prueba del Estudiante**")
-        prueba_file = st.file_uploader("Subir Prueba (PDF o Imagen)", type=["pdf", "png", "jpg", "jpeg"], key="prueba_file")
-        
-        prueba_part = None
-        if prueba_file:
-            prueba_bytes = prueba_file.read()
-            prueba_part = types.Part.from_bytes(data=prueba_bytes, mime_type=prueba_file.type)
-
-        btn_evaluar = st.button("🚀 Evaluar Prueba", use_container_width=True, type="primary")
-
-    with col_der:
-        st.subheader("2. Resultado de la Evaluación")
-        
-        if btn_evaluar:
-            if not rubrica_content:
-                st.warning("Debe ingresar o adjuntar una rúbrica.")
-                return
-            if not prueba_part:
-                st.warning("Debe adjuntar la prueba del estudiante.")
-                return
-
-            client = get_gemini_client()
-            
-            prompt_sistema = """
-            Eres un asistente docente experto en evaluación educativa.
-            Analiza la rúbrica entregada y la prueba del estudiante.
-            
-            Debes entregar la respuesta con la siguiente estructura exacta al inicio:
-            NOTA: [Nota obtenida, ej: 6.5]
-            PUNTAJE: [Puntaje obtenido / Puntaje total, ej: 28/30]
-            
-            Posteriormente, detalla el feedback formativo estructurado:
-            - Fortalezas observadas.
-            - Aspectos a mejorar según la rúbrica.
-            - Sugerencias concretas para el estudiante.
-            """
-
-            contents = []
-            if isinstance(rubrica_content, str):
-                contents.append(f"RÚBRICA DE EVALUACIÓN:\n{rubrica_content}")
-            else:
-                contents.append(rubrica_content)
-                
-            contents.append(prueba_part)
-            
-            with st.spinner("Analizando la prueba y generando retroalimentación..."):
-                resultado = generar_evaluacion_con_reintentos(client, contents, prompt_sistema)
-                
-            if resultado:
-                st.session_state["ultimo_resultado"] = resultado
-                st.session_state["ultimo_estudiante"] = estudiante if estudiante else "Estudiante"
-                st.session_state["ultimo_profesor"] = profesor if profesor else "Docente"
-
-                nota_val = "N/A"
-                puntaje_val = "N/A"
-                for line in resultado.split('\n'):
-                    if line.startswith("NOTA:"):
-                        nota_val = line.replace("NOTA:", "").strip()
-                    elif line.startswith("PUNTAJE:"):
-                        puntaje_val = line.replace("PUNTAJE:", "").strip()
-
-                st.session_state["ultima_nota"] = nota_val
-                st.session_state["ultimo_puntaje"] = puntaje_val
-
-                # Registrar en CSV local
-                df_actual = cargar_registro()
-                nuevo_registro = pd.DataFrame([{
-                    "Docente": profesor if profesor else "Docente",
-                    "Estudiante": estudiante if estudiante else "Estudiante",
-                    "Puntaje": puntaje_val,
-                    "Nota": nota_val,
-                    "Fecha": time.strftime("%Y-%m-%d %H:%M:%S")
-                }])
-                df_actual = pd.concat([df_actual, nuevo_registro], ignore_index=True)
-                guardar_registro(df_actual)
-
-        if "ultimo_resultado" in st.session_state:
-            st.success("Evaluación completada con éxito.")
-            
-            m1, m2 = st.columns(2)
-            m1.metric("Nota Obtenida", st.session_state.get("ultima_nota", "N/A"))
-            m2.metric("Puntaje Obt.", st.session_state.get("ultimo_puntaje", "N/A"))
-
-            st.markdown("### Retroalimentación Formativa")
-            st.write(st.session_state["ultimo_resultado"])
-
-            # Descargar PDF
-            pdf_bytes = generar_pdf_informe(
-                st.session_state.get("ultimo_profesor", "Docente"),
-                st.session_state.get("ultimo_estudiante", "Estudiante"),
-                st.session_state.get("ultima_nota", "N/A"),
-                st.session_state.get("ultimo_puntaje", "N/A"),
-                st.session_state["ultimo_resultado"]
-            )
-            
-            st.download_button(
-                label="📄 Descargar Informe PDF",
-                data=pdf_bytes,
-                file_name=f"Informe_{st.session_state.get('ultimo_estudiante', 'Estudiante')}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
-
-    # -------------------------------------------------------------------------
-    # SECCIÓN INFERIOR: PLANILLA DE REGISTRO ACUMULADO
-    # -------------------------------------------------------------------------
-    st.markdown("---")
-    st.subheader("📊 Registro Acumulado de Calificaciones")
-    
-    df_registro = cargar_registro()
-    if not df_registro.empty:
-        st.dataframe(df_registro, use_container_width=True)
-        excel_data = exportar_excel(df_registro)
-        st.download_button(
-            label="📥 Exportar Registro a Excel (.xlsx)",
-            data=excel_data,
-            file_name="registro_calificaciones.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.info("Aún no hay calificaciones registradas.")
-
-if __name__ == "__main__":
-    main()
