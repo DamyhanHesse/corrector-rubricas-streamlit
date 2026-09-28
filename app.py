@@ -111,7 +111,7 @@ CSV_FILE = "registro_calificaciones.csv"
 def get_gemini_client():
     api_key = st.secrets.get("GEMINI_API_KEY")
     if not api_key:
-        st.error("No se encontró 'GEMINI_API_KEY' en los Secrets de Streamlit.")
+        st.error("No se encontró 'GEMINI_API_KEY' in los Secrets de Streamlit.")
         st.stop()
     return genai.Client(api_key=api_key)
 
@@ -249,14 +249,8 @@ def main():
         opcion_rubrica = st.radio("Seleccione formato", ["Texto directo", "Archivo (Imagen/PDF)"], horizontal=True, label_visibility="collapsed")
         
         rubrica_content = None
-                st.markdown("<br><p style='font-weight:600; color:#94A3B8; margin-bottom:5px;'>Rúbrica de Evaluación</p>", unsafe_allow_html=True)
-        opcion_rubrica = st.radio("Seleccione formato", ["Texto directo", "Archivo (Imagen/PDF)"], horizontal=True, label_visibility="collapsed")
-        
-        rubrica_content = None
         if opcion_rubrica == "Texto directo":
             rubrica_content = st.text_area("Pegue la rúbrica detallada aquí", height=120, placeholder="Escriba los criterios o pegue la tabla de evaluación...")
         else:
             rubrica_file = st.file_uploader("Subir Rúbrica", type=["pdf", "png", "jpg", "jpeg"], key="rubrica_file")
             if rubrica_file:
-                # Asegúrate de que esta línea de abajo tenga la sangría correcta hacia la derecha
-                rubrica_content = types.Part.from_bytes(data=rubrica_file.read(), mime_type=rubrica_file.type)
